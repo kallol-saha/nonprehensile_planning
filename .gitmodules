@@ -13,3 +13,6 @@
 [submodule "vtamp/submodules/pyg_libs"]
 	path = vtamp/submodules/pyg_libs
 	url = https://github.com/r-pad/pyg_libs.git
+[submodule "visplan/submodules/robo_utils"]
+	path = visplan/submodules/robo_utils
+	url = git@github.com:kallol-saha/robo-utils.git
