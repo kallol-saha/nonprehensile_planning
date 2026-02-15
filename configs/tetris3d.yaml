@@ -1,0 +1,183 @@
+############# FOR BENCHMARKING #############
+
+benchmark_name: table_bussing_sim_trial
+ablation: null
+
+# For execution
+eval_dataset_folder: assets/eval
+
+eval_folder_location: assets/eval/
+eval_folders:
+  - three_cubes_heuristic
+  - three_cubes_dp3_comparison
+
+############################################
+
+extrinsics_file: "assets/sim_extrinsics_ground_to_table.npz"    # Should have a key "T" that contains a 4x4 transformation from camera to world
+
+# Simulation:
+gui: True
+scene_config_folder: configs/scenes/
+scene: tetris3d_scene
+objects_folder: assets/objects/
+max_control_iters: 1000
+tolerance: 0.001
+stability_iters: 1000
+gripper_close: 1.
+gripper_open: 0.01771439
+max_joint_force: 240.
+
+############################################
+
+data_folder: assets/data/
+task_name: table_bussing
+
+
+############# FOR PLANNING #############
+
+num_points: 1024
+
+# ------------ Suggester parameters ------------ #
+suggester:
+  name: taxposed
+  num_suggestions: 5
+  weights: assets/weights/table_bussing_four_objects_without_origin/epoch_1359_global_step_170000.ckpt
+  config_folder: ../configs/training
+  config_file: suggester.yaml
+  x_thresh: 20.
+  y_thresh: 20.
+  z_thresh: 45.
+  min_height: 0.65
+  max_height: 0.8
+  min_movement: 0.08
+  remove_outliers: False
+  adjust_height: True
+  probability_weight: 0.05
+
+# ------------ Object Suggester parameters ------------ #
+
+object_suggester:
+  active: True
+  weights_folder: assets/weights/object_suggester_classifier
+  folder_name: table_bussing_sim
+
+# ------------ Planner parameters ------------ #
+
+planner:
+  name: astar
+  beam_width: 3
+  num_objects: 3
+  action_cost: 0.01
+  object_ids: 2,3,4
+  max_expanded_nodes: 200
+  max_path_length: 6
+  filter_small_actions: null
+  downsample: True
+  num_points: 1024
+  max_goals: 20
+
+
+# ------------ MDE parameters ------------ #
+
+mde:
+  active: False
+  weight: 1.  # Relative weighting as part of g(n)
+  weights_folder: assets/weights/table_bussing_four_objects_without_origin/epoch_1359_global_step_170000
+  folder_name: mde
+  threshold: 0.50  # Not used
+  mean_centered: True
+  classifier: False
+
+# ------------ Collision parameters ------------ #
+
+collision:
+  voxel_size: 0.01
+  prune: False  # If true, will prune based on below thresholds
+  pick_threshold: 0.17     # This is a collision ratio
+  drop_threshold: 0.10     # This is a collision ratio
+  weight: 10.  # Relative weighting as part of g(n)
+  x_width: 32
+  y_width: 32
+  z_width: 32
+  x_lower: -0.2
+  x_upper: 0.2
+  y_lower: -0.2
+  y_upper: 0.2
+  z_lower: 0.5
+  z_upper: 0.9
+  drop_height: 0.0                   # Only used for collision checking
+  remove_outliers: False
+  # inlier_ratio: 0.372 # 0.4 * 0.93          # Also used inside suggestion for filtering
+  # radius: 0.12
+  extrinsics_file: null  # "assets/extrinsics.npz"
+
+# ------------ Heuristic ------------ #
+
+heuristic:
+  plate_align_thresh: 0.09    # 0.07
+  bowl_align_thresh: 0.06
+  stacking_align_thresh: 0.06
+
+############# FOR GRAPH VISUALIZATION #############
+
+visual:
+  camera_zoom_out: 0.2   # in cm
+  point_size: 0.8
+  seg_colors:     # seg colors for block stacking, is None by default for real world
+    1: gray
+    2: red
+    3: green
+    4: blue
+    5: pink
+  camera_params:   # camera params for visualization in sim, is None by default for real world -> because origin is the camera
+    front: [0.5416752204197018, -0.5416752204197018, 0.6427876096865393]
+    lookat: [0.0, 0.0, 0.693]
+    up: [0.0, 0.0, 1.0]
+    zoom: 0.70
+  graphs:
+    full_graph: True
+    pruned_graph: False
+    expanded_graph: False
+    plan_graph: True
+
+############################################
+
+recording_camera: null
+
+  # output_file: execution.mp4    # Saved in the plan_folder
+  # fps: 60
+
+  # mode: "distance"    # or "position"
+
+  # target: [0., 0., 0.8]
+
+  # # For distance mode:
+  # distance: 0.7
+  # yaw: 20.
+  # pitch: -20.
+  # roll: 0.
+  # up_axis_index: 2
+
+  # # whether camera moves:
+  # moving: False
+  # yaw_limit: 160.
+  # yaw_rate: 0.
+
+  # # For position mode:
+  # eye: [1., 1., 1.]
+  # up_vec: [0., 0., 1.]
+
+  # # Intrinsics:
+  # width: 640
+  # height: 480
+  # fov: 80
+  # near: 0.02
+  # far: 50
+
+  # # If camera is already saved somewhere:
+  # view_matrix: None
+  # projection_matrix: None
+
+close_gripper_record_skip: 20
+stability_record_skip: 20
+actuate_gripper_record_skip: 20

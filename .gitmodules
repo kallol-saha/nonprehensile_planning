@@ -1,0 +1,15 @@
+# [submodule "scripts/GSAM"]
+# 	path = scripts/GSAM
+# 	url = git@github.com:JiaheXu/Grounded-Segment-Anything.git
+# [submodule "GSAM"]
+# 	path = GSAM
+# 	url = git@github.com:JiaheXu/Grounded-Segment-Anything.git
+# [submodule "Flowbot3d"]
+# 	path = flowbot3d
+# 	url = https://github.com/r-pad/flowbot3d.git
+# [submodule "vnn"]
+# 	path = vnn
+# 	url = https://github.com/FlyingGiraffe/vnn.git
+[submodule "vtamp/submodules/pyg_libs"]
+	path = vtamp/submodules/pyg_libs
+	url = https://github.com/r-pad/pyg_libs.git

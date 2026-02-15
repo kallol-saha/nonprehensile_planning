@@ -1,0 +1,139 @@
+crop_table_length: 0.4
+
+robot:
+
+  # file: franka_panda/panda.urdf
+  file: vtamp/submodules/pybullet_planning/models/franka_description/robots/panda_arm_hand.urdf
+  pos: [-0.4, 0., 0.6]
+  orn: [0., 0., 0., 1.]
+  scale: 1.
+  fixed_base: true
+  joint_work_ratio: [45., 35, 25, 15, 5, 2, 1]
+  joints:
+    - name: roll1
+      joint_idx: 0
+      joint_value: 0.0
+    - name: pitch1
+      joint_idx: 1
+      joint_value: 0.0
+    - name: roll2
+      joint_idx: 2
+      joint_value: 0.0
+    - name: pitch2
+      joint_idx: 3
+      joint_value: 0.0
+    - name: roll3
+      joint_idx: 4
+      joint_value: 0.0
+    - name: pitch3
+      joint_idx: 5
+      joint_value: 0.0
+    - name: roll4
+      joint_idx: 6
+      joint_value: 0.0
+    - name: finger
+      joint_idx: 7
+      joint_value: 0.0
+  grasp_depth: 0.09
+
+cameras:
+
+  0:
+    mode: "distance"    # or "position"
+
+    target: [0., 0., 0.7]
+
+    # For distance mode:
+    distance: 0.8
+    yaw: 135.
+    pitch: -40.
+    roll: 0.
+    up_axis_index: 2
+
+    # For position mode:
+    eye: [1., 1., 1.]
+    up_vec: [0., 0., 1.]
+
+    # Intrinsics:
+    width: 512
+    height: 512
+    fov: 60
+    near: 0.02
+    far: 50
+
+    # If camera is already saved somewhere:
+    view_matrix: None
+    projection_matrix: None
+
+  # 1:
+  #   mode: "distance"    # or "position"
+
+  #   target: [0., 0., 0.7]
+
+  #   # For distance mode:
+  #   distance: 0.8
+  #   yaw: 45.
+  #   pitch: -40.
+  #   roll: 0.
+  #   up_axis_index: 2
+
+  #   # For position mode:
+  #   eye: [1., 1., 1.]
+  #   up_vec: [0., 0., 1.]
+
+  #   # Intrinsics:
+  #   width: 512
+  #   height: 512
+  #   fov: 60
+  #   near: 0.02
+  #   far: 50
+
+  #   # If camera is already saved somewhere:
+  #   view_matrix: None
+  #   projection_matrix: None
+
+
+objects:
+
+  table:
+    file: table.urdf
+    pos: [0., 0., 0.]
+    orn: [0., 0., 0., 1.]
+    scale: 1.
+    fixed_base: true
+
+  pink_bowl:
+    file: pink_bowl.urdf
+    pos: [0.25, 0., 0.64]
+    orn: [0.7071068, 0, 0, 0.7071068]
+    radius: 7.7
+    scale: 0.013
+    grasp: [-0.01828055, 0.19455471, -0.08616473, -0.35801099, -0.58242209, 0.64322799, -0.34477587]
+    fixed_base: false
+
+  yellow_bowl:
+    file: yellow_bowl.urdf
+    pos: [0.25, 0.2, 0.64]
+    orn: [0.7071068, 0, 0, 0.7071068]
+    radius: 7.7
+    scale: 0.013
+    grasp: [-0.01828055, 0.19455471, -0.08616473, -0.35801099, -0.58242209, 0.64322799, -0.34477587]
+    fixed_base: false
+
+  cup:
+    file: cup.urdf
+    pos: [0., 0., 0.69]
+    orn: [0.7071068, 0, 0, 0.7071068]
+    radius: 0.07
+    scale: 1.0
+    grasp: [-0.01608608, 0.18938123, 0.0688718, 0.57234014, 0.52757477, -0.35501766, 0.5177394]
+    fixed_base: false
+
+  plate:
+    file: plate.urdf
+    pos: [0., 0., 0.626]
+    orn: [0.7071068, 0, 0, 0.7071068]
+    radius: 166.32
+    scale: 0.0009
+    grasp: [-0.13082989, 0.14083118, -0.11592035, 0.12377408, 0.69891202, -0.51720511, 0.47822678]
+    fixed_base: false

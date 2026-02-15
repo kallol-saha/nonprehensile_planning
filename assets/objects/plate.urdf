@@ -1,0 +1,31 @@
+<?xml version="0.0"?>
+<robot name="plate.urdf">
+    <link name="base_link">
+
+        <contact>
+        <lateral_friction value="1.0"/>
+        </contact>
+
+        <visual>
+            <geometry>
+                <mesh filename="plate.obj" scale="1 1 1"/>
+            </geometry>
+            <material name="green">
+                <color rgba="0.67 0.91 0.36 1"/>
+            </material>
+        </visual>
+
+        <collision>
+            <geometry>
+                <mesh filename="plate_vhacd2.obj" scale="1 1 1"/>
+            </geometry>
+            <bullet collisionMargin="0.0001" mesh="gimpact"/>
+        </collision>
+
+        <inertial>
+            <mass value="0.3"/>
+            <origin xyz="0 0 0"/>
+            <inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/>
+        </inertial>
+    </link>
+</robot>

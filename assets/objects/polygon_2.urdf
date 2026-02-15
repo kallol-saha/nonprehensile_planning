@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+    <robot name="convex_mesh">
+    <link name="base_link">
+        <!-- Visual Representation -->
+        <visual>
+            <geometry>
+                <mesh filename="polygon_2.obj" scale="1 1 1"/>
+            </geometry>
+            <material name="custom_color">
+                <color rgba="0.02021839744032572 0.832619845547938 0.7781567509498505 1.0"/>
+            </material>
+        </visual>
+
+        <!-- Collision Geometry -->
+        <collision>
+            <geometry>
+                <mesh filename="polygon_2.obj" scale="1 1 1"/>
+            </geometry>
+        </collision>
+
+        <!-- Inertial Properties -->
+        <inertial>
+            <mass value="1.0"/>
+            <origin xyz="0.009733243018125856 -0.03385976219853881 0.015000000000000001"/>
+            <inertia ixx="0.01" ixy="0.0" ixz="0.0"
+                    iyy="0.01" iyz="0.0"
+                    izz="0.01"/>
+        </inertial>
+    </link>
+    </robot>
