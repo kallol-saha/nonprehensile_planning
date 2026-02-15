@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "robo_utils"
+version = "0.1.0"
+description = "Utilities for robotics projects including visualization and point cloud processing"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "Kallol Saha", email = "kallolsaharesearch@gmail.com"},
+]
+keywords = ["robotics", "visualization", "point-cloud", "pytorch", "open3d"]
+
+dependencies = [
+    "numpy>=1.26.4",
+    "scipy"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=6.0",
+    "pytest-cov>=2.0",
+    "black>=21.0",
+    "flake8>=3.8",
+    "mypy>=0.800",
+    "pre-commit>=2.0",
+]
+docs = [
+    "sphinx>=4.0",
+    "sphinx-rtd-theme>=0.5",
+    "myst-parser>=0.15",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["robo_utils*"]

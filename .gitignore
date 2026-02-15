@@ -1,6 +1,29 @@
 # Created by https://www.toptal.com/developers/gitignore/api/python,visualstudiocode,macos,pycharm,git,linux
 # Edit at https://www.toptal.com/developers/gitignore?templates=python,visualstudiocode,macos,pycharm,git,linux
 
+# pixi environments
+.pixi
+*.egg-info
+assets
+__pycache__
+demos
+*.pth
+
+log.txt
+media/
+nodes/
+
+# visualize_*
+
+*.mp4
+
+/*.npy
+/*.png
+test_graph/
+*.npz
+
+visplan/submodules/curobo/
+
 ### Git ###
 # Created by git for backups. To disable backups in Git:
 # $ git config --global mergetool.keepBackup false
