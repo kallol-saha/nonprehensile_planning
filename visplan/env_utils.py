@@ -19,7 +19,6 @@ from mani_skill.utils.geometry.trimesh_utils import get_component_mesh
 from sapien.physx import PhysxRigidBodyComponent
 
 from visplan.robot_controller import RobotController
-from visplan.motionplanner import MotionPlanner
 
 import numpy as np
 from scipy.spatial.transform import Rotation as R
@@ -45,15 +44,12 @@ from visplan.submodules.robo_utils.robo_utils.conversion_utils import (
     move_pose_along_local_z,
     furthest_point_sample
 )
-from models.flowmatch_actor.modeling.policy.denoise_actor_3d_packing import DenoiseActor
-from models.flowmatch_actor.utils.common_utils import count_parameters
 
 from visplan.generation_utils import (
-    create_shelf, 
-    sample_object_pose_on_table, 
+    sample_object_pose_on_table,
     sample_object_pose_on_table_multi_object,
-    sample_object_pose_on_shelf, 
-    sample_point_in_fixed_rectangle, 
+    sample_object_pose_on_shelf,
+    sample_point_in_fixed_rectangle,
     sample_point_in_fixed_rectangle_uniformly,
     compute_ray_box_intersection
 )
@@ -483,6 +479,8 @@ class ManiSkillEnvUtils:
         i = 0
         while i < steps:
             _ = self.control_robot(current_robot_qpos)
+            if self.render_mode is not None:
+                self.render()
             i += 1
     
     def wait_for_stability(self, max_steps: int = 200):

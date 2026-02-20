@@ -63,11 +63,10 @@ from models.flowmatch_actor.modeling.policy.denoise_actor_3d_packing import Deno
 from models.flowmatch_actor.utils.common_utils import count_parameters
 
 from visplan.generation_utils import (
-    create_shelf, 
-    sample_object_pose_on_table, 
+    sample_object_pose_on_table,
     sample_object_pose_on_table_multi_object,
-    sample_object_pose_on_shelf, 
-    sample_point_in_fixed_rectangle, 
+    sample_object_pose_on_shelf,
+    sample_point_in_fixed_rectangle,
     sample_point_in_fixed_rectangle_uniformly,
     compute_ray_box_intersection
 )

@@ -3,9 +3,11 @@ import xml.etree.ElementTree as ET
 import trimesh
 import numpy as np
 import pybullet as p
+import shapely
 from shapely.geometry import Polygon, box, MultiPolygon
 from shapely.affinity import rotate, translate
-from shapely.ops import unary_union
+from shapely.ops import unary_union, voronoi_diagram
+from shapely import MultiPoint
 import matplotlib.pyplot as plt
 
 GRID_SIZE = 0.001
@@ -43,242 +45,6 @@ def scale_urdf_meshes(urdf_file, scale_factor, output_file):
         mesh.set("scale", " ".join(f"{x:.6f}" for x in new_scale))
 
     tree.write(output_file, encoding="utf-8", xml_declaration=True)
-
-
-# ------------------ SHELF GENERATION UTILS ------------------ #
-
-def save_shelf_urdf(
-    shelf_height,
-    shelf_width, 
-    shelf_depth, 
-    wall_thickness, 
-    shelf_distance_from_floor,
-    bottom_wall_height,
-    shelf_folder = "assets/shelf", 
-    color = (0.6, 0.4, 0.2), 
-    urdf_filename="shelf.urdf"
-):
-    urdf_file_path = os.path.join(shelf_folder, urdf_filename)
-
-    """
-    Generates a URDF file for a shelf with multiple walls connected by fixed joints.
-
-    :param shelf_folder: Folder containing the shelf mesh files.
-    :param color: A tuple of length 3 representing the RGB color of the shelf.
-    :param urdf_filename: Name of the output URDF file.
-    """
-
-    # shelf_position = [
-    #     0., 
-    #     0., 
-    #     shelf_distance_from_floor
-    #     ]
-
-    bottom_wall_position = [
-        0., 
-        0., 
-        shelf_distance_from_floor - bottom_wall_height
-        ]
-
-    left_wall_position = [
-        0., 
-        -(shelf_width / 2 + wall_thickness / 2), 
-        0.
-        ]
-    right_wall_position = [
-        0., 
-        shelf_width / 2 + wall_thickness / 2, 
-        0.
-        ]
-    back_wall_position = [
-        (shelf_depth / 2 + wall_thickness / 2), 
-        0., 
-        0.
-        ]
-    top_wall_position = [
-        0., 
-        0., 
-        shelf_distance_from_floor + shelf_height + wall_thickness
-        ]
-
-    urdf_content = f'''<?xml version="1.0"?>
-<robot name="dummy">
-  <link name="bottom_wall">
-    <visual>
-      <origin xyz="{bottom_wall_position[0]} {bottom_wall_position[1]} {bottom_wall_position[2]}" rpy="0 0 0"/>
-      <geometry>
-        <mesh filename="bottom_wall.obj" scale="1 1 1"/>
-      </geometry>
-      <material name="brown">
-        <color rgba="{color[0]} {color[1]} {color[2]} 1.0"/>
-      </material>
-    </visual>
-    <collision>
-      <origin xyz="{bottom_wall_position[0]} {bottom_wall_position[1]} {bottom_wall_position[2]}" rpy="0 0 0"/>
-      <geometry>
-        <mesh filename="bottom_wall.obj" scale="1 1 1"/>
-      </geometry>
-    </collision>
-  </link>
-
-  <link name="left_wall">
-    <visual>
-      <origin xyz="{left_wall_position[0]} {left_wall_position[1]} {left_wall_position[2]}" rpy="0 0 0"/>
-      <geometry>
-        <mesh filename="vertical_wall.obj" scale="1 1 1"/>
-      </geometry>
-      <material name="brown">
-        <color rgba="{color[0]} {color[1]} {color[2]} 1.0"/>
-      </material>
-    </visual>
-    <collision>
-      <origin xyz="{left_wall_position[0]} {left_wall_position[1]} {left_wall_position[2]}" rpy="0 0 0"/>
-      <geometry>
-        <mesh filename="vertical_wall.obj" scale="1 1 1"/>
-      </geometry>
-    </collision>
-  </link>
-
-  <link name="right_wall">
-    <visual>
-      <origin xyz="{right_wall_position[0]} {right_wall_position[1]} {right_wall_position[2]}" rpy="0 0 0"/>
-      <geometry>
-        <mesh filename="vertical_wall.obj" scale="1 1 1"/>
-      </geometry>
-      <material name="brown">
-        <color rgba="{color[0]} {color[1]} {color[2]} 1.0"/>
-      </material>
-    </visual>
-    <collision>
-      <origin xyz="{right_wall_position[0]} {right_wall_position[1]} {right_wall_position[2]}" rpy="0 0 0"/>
-      <geometry>
-        <mesh filename="vertical_wall.obj" scale="1 1 1"/>
-      </geometry>
-    </collision>
-  </link>
-
-  <link name="back_wall">
-    <visual>
-      <origin xyz="{back_wall_position[0]} {back_wall_position[1]} {back_wall_position[2]}" rpy="0 0 0"/>
-      <geometry>
-        <mesh filename="back_wall.obj" scale="1 1 1"/>
-      </geometry>
-      <material name="brown">
-        <color rgba="{color[0]} {color[1]} {color[2]} 1.0"/>
-      </material>
-    </visual>
-    <collision>
-      <origin xyz="{back_wall_position[0]} {back_wall_position[1]} {back_wall_position[2]}" rpy="0 0 0"/>
-      <geometry>
-        <mesh filename="back_wall.obj" scale="1 1 1"/>
-      </geometry>
-    </collision>
-  </link>
-
-  <link name="top_wall">
-    <visual>
-      <origin xyz="{top_wall_position[0]} {top_wall_position[1]} {top_wall_position[2]}" rpy="0 0 0"/>
-      <geometry>
-        <mesh filename="top_wall.obj" scale="1 1 1"/>
-      </geometry>
-      <material name="brown">
-        <color rgba="{color[0]} {color[1]} {color[2]} 1.0"/>
-      </material>
-    </visual>
-    <collision>
-      <origin xyz="{top_wall_position[0]} {top_wall_position[1]} {top_wall_position[2]}" rpy="0 0 0"/>
-      <geometry>
-        <mesh filename="top_wall.obj" scale="1 1 1"/>
-      </geometry>
-    </collision>
-  </link>
-
-  <joint name="left_wall_joint" type="fixed">
-    <origin xyz="0 0 0" rpy="0 0 0"/>
-    <parent link="bottom_wall"/>
-    <child link="left_wall"/>
-  </joint>
-
-  <joint name="right_wall_joint" type="fixed">
-    <origin xyz="0 0 0" rpy="0 0 0"/>
-    <parent link="bottom_wall"/>
-    <child link="right_wall"/>
-  </joint>
-
-  <joint name="back_wall_joint" type="fixed">
-    <origin xyz="0 0 0" rpy="0 0 0"/>
-    <parent link="bottom_wall"/>
-    <child link="back_wall"/>
-  </joint>
-
-  <joint name="top_wall_joint" type="fixed">
-    <origin xyz="0 0 0" rpy="0 0 0"/>
-    <parent link="bottom_wall"/>
-    <child link="top_wall"/>
-  </joint>
-
-</robot>'''
-
-    # Save to file
-    with open(urdf_file_path, "w") as f:
-        f.write(urdf_content)
-
-    print(f"URDF saved as {urdf_file_path}")
-
-def create_shelf(
-    mesh_folder = "assets/shelf",
-    shelf_width = 0.6, 
-    shelf_height = 0.8, 
-    shelf_depth = 0.3, 
-    wall_thickness = 0.01, 
-    shelf_distance_from_floor = 0.4,
-    bottom_wall_height = 0.088,
-    color = (0.6, 0.4, 0.2) # Brown
-):   
-
-    horizontal_rectangle = Polygon([(-shelf_depth / 2, -shelf_width / 2), (-shelf_depth / 2, shelf_width / 2), 
-                    (shelf_depth / 2, shelf_width / 2), (shelf_depth / 2, -shelf_width / 2)])
-
-    vertical_rectangle = Polygon([(-shelf_depth / 2, -wall_thickness / 2), (-shelf_depth / 2, wall_thickness / 2), 
-                    (shelf_depth / 2, wall_thickness / 2), (shelf_depth / 2, -wall_thickness / 2)])
-
-    back_rectangle = Polygon([(-wall_thickness / 2, -shelf_width / 2), (-wall_thickness / 2, shelf_width / 2), 
-                    (wall_thickness / 2, shelf_width / 2), (wall_thickness / 2, -shelf_width / 2)])
-
-    full_height = shelf_distance_from_floor + (1.5 * wall_thickness) + shelf_height
-    
-    top_wall_mesh = trimesh.creation.extrude_polygon(horizontal_rectangle, height = wall_thickness)
-    vertical_wall_mesh = trimesh.creation.extrude_polygon(vertical_rectangle, height = full_height)
-    back_wall_mesh = trimesh.creation.extrude_polygon(back_rectangle, height = full_height)
-    bottom_wall_mesh = trimesh.creation.extrude_polygon(horizontal_rectangle, height = bottom_wall_height)
-
-    # Make the directory where the meshes will be saved
-    os.makedirs(mesh_folder, exist_ok=True)
-    
-    # Save the meshes into OBJ files
-    top_wall_mesh.export(os.path.join(mesh_folder, "top_wall.obj"))
-    vertical_wall_mesh.export(os.path.join(mesh_folder, "vertical_wall.obj"))
-    back_wall_mesh.export(os.path.join(mesh_folder, "back_wall.obj"))
-    bottom_wall_mesh.export(os.path.join(mesh_folder, "bottom_wall.obj"))
-
-    # Run V-HACD on the meshes and save them again
-    p.vhacd(os.path.join(mesh_folder, "top_wall.obj"), os.path.join(mesh_folder, "top_wall.obj"), "log.txt")
-    p.vhacd(os.path.join(mesh_folder, "vertical_wall.obj"), os.path.join(mesh_folder, "vertical_wall.obj"), "log.txt")
-    p.vhacd(os.path.join(mesh_folder, "back_wall.obj"), os.path.join(mesh_folder, "back_wall.obj"), "log.txt")
-    p.vhacd(os.path.join(mesh_folder, "bottom_wall.obj"), os.path.join(mesh_folder, "bottom_wall.obj"), "log.txt")
-
-    # Save the URDF file
-    save_shelf_urdf(
-        shelf_height, 
-        shelf_width, 
-        shelf_depth, 
-        wall_thickness, 
-        shelf_distance_from_floor, 
-        bottom_wall_height,
-        mesh_folder, 
-        color,
-        urdf_filename="shelf.urdf")
-
 
 # ------------------ CAMERA POSITION SAMPLING UTILS ------------------ #
 
@@ -658,29 +424,143 @@ def visualize_regions(regions):
   ax.set_xlim(0, 1)
   ax.set_ylim(-1, 1)
   plt.show()
-    
 
-# if __name__ == "__main__":
-#     # Define semicircles and rectangle
-#     center = (0, 0)
-#     r_inner, r_outer = 3.0, 5.0
-#     y_limit = 1.0  # C-region starts only from y=1.0
-#     c_region = c_shape(center, r_inner, r_outer, lower_bound=0, upper_bound=np.pi, y_limit=y_limit)
 
-#     # Example fixed rectangle
-#     rect_existing = box(-1, 0, 1, 1)    # minx, miny, maxx, maxy
-#     forbidden = rect_existing.intersection(c_region)
+# ------------------ VORONOI GENERATION UTILS ------------------ #
 
-#     # Sample a new rectangle
-#     rect_sampled = sample_rectangle_in_cshape(c_region, forbidden, width=0.5, height=0.5)
+def generate_voronoi_meshes(
+    num_points: int = 5,
+    side_length: float = 0.2,
+    scale_factor: float = 0.9,
+    extrusion_height: float = 0.03,
+    seed: int = 0,
+):
+    """
+    Generate 3D Voronoi polygon meshes by creating a 2D Voronoi diagram,
+    scaling down each cell, and extruding to 3D.
 
-#     print(rect_sampled)
-    
-#     fig, ax = plt.subplots()
-#     for geom, color in [(c_region, 'lightgray'), (rect_existing, 'blue'), (rect_sampled, 'green')]:
-#         if geom:
-#             xs, ys = geom.exterior.xy
-#             ax.fill(xs, ys, alpha=0.5, fc=color, ec='black')
+    Returns:
+        meshes: list of trimesh.Trimesh objects
+        centroids: list of (x, y) centroid positions for each polygon
+    """
+    rng = np.random.RandomState(seed)
+    sampled_points = rng.rand(num_points, 2) * side_length - side_length / 2
+    points = MultiPoint(sampled_points)
+    vor = voronoi_diagram(points)
 
-#     ax.set_aspect('equal')
-#     plt.show()
+    env_boundary = Polygon([
+        (-side_length / 2, -side_length / 2),
+        (-side_length / 2, side_length / 2),
+        (side_length / 2, side_length / 2),
+        (side_length / 2, -side_length / 2),
+    ])
+
+    meshes = []
+    centroids = []
+
+    for poly in vor.geoms:
+        clipped = poly.intersection(env_boundary)
+        centroid = clipped.centroid
+        scaled = shapely.affinity.scale(clipped, xfact=scale_factor, yfact=scale_factor, origin='centroid')
+        # Translate polygon so its centroid is at the origin before extruding,
+        # so that the mesh is centered at (0,0) in its local frame.
+        centered = shapely.affinity.translate(scaled, xoff=-centroid.x, yoff=-centroid.y)
+        mesh = trimesh.creation.extrude_polygon(centered, height=extrusion_height)
+        meshes.append(mesh)
+        centroids.append((centroid.x, centroid.y))
+
+      
+    # plot_voronoi_meshes(meshes, centroids)
+
+    return meshes, centroids
+
+
+def plot_voronoi_meshes(meshes, centroids):
+    """Plot the 2D cross-sections of Voronoi meshes with their centroids."""
+    fig, ax = plt.subplots()
+    colors = plt.cm.tab10(np.linspace(0, 1, len(meshes)))
+
+    for i, (mesh, (cx, cy)) in enumerate(zip(meshes, centroids)):
+        # Project 3D mesh to 2D by taking the XY outline
+        vertices = mesh.vertices[:, :2]
+        hull = Polygon(vertices).convex_hull
+        xs, ys = hull.exterior.xy
+        ax.fill(xs, ys, alpha=0.5, fc=colors[i], ec='black', label=f'piece {i}')
+        ax.plot(cx, cy, 'k+', markersize=10, markeredgewidth=2)
+        ax.annotate(str(i), (cx, cy), fontsize=8, ha='center', va='bottom')
+
+    ax.set_aspect('equal')
+    ax.set_title(f'{len(meshes)} Voronoi pieces')
+    ax.legend(fontsize=7, loc='upper right')
+    plt.tight_layout()
+    plt.show()
+
+
+def _save_voronoi_urdf(obj_filename: str, centroid, color, urdf_path: str):
+    """Generate a URDF file referencing an OBJ mesh file."""
+    urdf_content = f'''<?xml version="1.0"?>
+<robot name="convex_mesh">
+<link name="base_link">
+    <visual>
+        <geometry>
+            <mesh filename="{obj_filename}" scale="1 1 1"/>
+        </geometry>
+        <material name="custom_color">
+            <color rgba="{color[0]} {color[1]} {color[2]} 1.0"/>
+        </material>
+    </visual>
+    <collision>
+        <geometry>
+            <mesh filename="{obj_filename}" scale="1 1 1"/>
+        </geometry>
+    </collision>
+    <inertial>
+        <mass value="0.1"/>
+        <origin xyz="{centroid[0]} {centroid[1]} {centroid[2]}"/>
+        <inertia ixx="0.001" ixy="0.0" ixz="0.0"
+                iyy="0.001" iyz="0.0"
+                izz="0.001"/>
+    </inertial>
+</link>
+</robot>'''
+    with open(urdf_path, "w") as f:
+        f.write(urdf_content)
+
+
+def save_voronoi_assets(meshes, output_dir: str, seed: int = 0):
+    """
+    Export meshes to OBJ, run VHACD convex decomposition, and generate URDFs.
+
+    Args:
+        meshes: list of trimesh.Trimesh objects
+        output_dir: directory to write OBJ and URDF files
+        seed: random seed for colors
+
+    Returns:
+        urdf_paths: list of absolute paths to generated URDF files
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    rng = np.random.RandomState(seed + 42)
+    colors = rng.rand(len(meshes), 3)
+
+    # Connect pybullet in DIRECT mode for VHACD
+    physics_client = p.connect(p.DIRECT)
+
+    urdf_paths = []
+    for i, mesh in enumerate(meshes):
+        obj_filename = f"polygon_{i}.obj"
+        urdf_filename = f"polygon_{i}.urdf"
+        obj_path = os.path.join(output_dir, obj_filename)
+        urdf_path = os.path.join(output_dir, urdf_filename)
+
+        mesh.export(obj_path)
+        p.vhacd(obj_path, obj_path, os.path.join(output_dir, "vhacd_log.txt"),
+                physicsClientId=physics_client)
+
+        _save_voronoi_urdf(obj_filename, mesh.centroid, colors[i], urdf_path)
+        urdf_paths.append(os.path.abspath(urdf_path))
+
+    p.disconnect(physics_client)
+    return urdf_paths
+
