@@ -13,8 +13,8 @@ def main():
     env = gym.make(
         "VoronoiReassembly-v1",
         parallel_in_single_scene=False,
-        viewer_camera_configs=dict(shader_pack="rt-fast"),
-        num_envs=2,
+        # viewer_camera_configs=dict(shader_pack="rt-fast"),
+        num_envs=1,
         render_mode="human",
         num_voronoi_points=4,
         side_length=0.2,

@@ -18,7 +18,7 @@ from mani_skill.utils import sapien_utils
 from mani_skill.utils.geometry.trimesh_utils import get_component_mesh
 from sapien.physx import PhysxRigidBodyComponent
 
-from visplan.robot_controller import RobotController
+# from visplan.robot_controller import RobotController
 
 import numpy as np
 from scipy.spatial.transform import Rotation as R
