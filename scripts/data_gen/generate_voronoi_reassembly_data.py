@@ -188,18 +188,34 @@ def interpolate_se2(start, goal, T):
 # ------------------------------------------------------------------ #
 
 def scatter_pieces(env, rng,
-                   speed_min=0.3, speed_max=0.8,
-                   scatter_steps=100, settle_steps=200):
-    """Push every piece outward from the centre with random velocity, then
-    let physics settle.
+                   speed_min=0.4, speed_max=1.0,
+                   angular_speed_max=3.0,
+                   direction_noise=0.35,
+                   scatter_steps=150, settle_steps=350):
+    """Push and spin every piece outward from the centre, then let physics settle.
 
-    Each piece's velocity direction is its centroid direction plus isotropic
-    noise; the speed is sampled uniformly in ``[speed_min, speed_max]``.
+    Each piece receives:
+      - A linear velocity directed roughly outward from its centroid, with
+        isotropic directional noise controlled by ``direction_noise`` (σ).
+      - A random yaw (ωz) angular velocity in ``[-angular_speed_max,
+        +angular_speed_max]`` rad/s, so pieces come to rest at arbitrary
+        orientations.  This makes reassembly require both translation *and*
+        rotation, yielding significantly more complex trajectories.
+
+    Args:
+        speed_min:         Minimum outward linear speed (m/s).
+        speed_max:         Maximum outward linear speed (m/s).
+        angular_speed_max: Maximum magnitude of yaw angular velocity (rad/s).
+        direction_noise:   Standard deviation of isotropic noise added to the
+                           outward scatter direction before normalisation.
+        scatter_steps:     Physics steps during which velocities are active.
+        settle_steps:      Physics steps to let pieces come to rest afterward.
     """
     uw = env.unwrapped
     for i, (cx, cy) in enumerate(uw.centroids):
+        # --- linear velocity: outward from centroid + directional noise ---
         direction = np.array([cx, cy, 0.0])
-        direction[:2] += rng.normal(0, 0.15, size=2)
+        direction[:2] += rng.normal(0, direction_noise, size=2)
         norm = np.linalg.norm(direction)
         if norm < 1e-8:
             direction = np.array([rng.normal(), rng.normal(), 0.0])
@@ -207,8 +223,13 @@ def scatter_pieces(env, rng,
         direction /= norm
 
         speed = rng.uniform(speed_min, speed_max)
-        vel = torch.tensor(direction * speed, dtype=torch.float32).unsqueeze(0)
-        uw.set_piece_velocities(vel, piece_indices=[i])
+        lin_vel = torch.tensor(direction * speed, dtype=torch.float32).unsqueeze(0)
+        uw.set_piece_velocities(lin_vel, piece_indices=[i])
+
+        # --- angular velocity: random yaw spin ---
+        omega_z = rng.uniform(-angular_speed_max, angular_speed_max)
+        ang_vel = torch.tensor([[0.0, 0.0, omega_z]], dtype=torch.float32)
+        uw.set_piece_angular_velocities(ang_vel, piece_indices=[i])
 
     uw.sim_step(scatter_steps)
     uw.sim_step(settle_steps)
@@ -286,9 +307,9 @@ def parse_args():
                    help="Total number of episodes to generate.")
     p.add_argument("--episodes_per_voronoi", type=int, default=10,
                    help="Scatter variations per Voronoi configuration.")
-    p.add_argument("--num_points_min", type=int, default=3,
+    p.add_argument("--num_points_min", type=int, default=5,
                    help="Min number of Voronoi seed points.")
-    p.add_argument("--num_points_max", type=int, default=8,
+    p.add_argument("--num_points_max", type=int, default=12,
                    help="Max number of Voronoi seed points.")
     p.add_argument("--side_length", type=float, default=0.2,
                    help="Side length of the square to tessellate (metres).")
@@ -296,13 +317,21 @@ def parse_args():
                    help="Number of timesteps per trajectory.")
     p.add_argument("--image_size", type=int, default=256,
                    help="Resolution of overhead images and masks.")
-    p.add_argument("--scatter_speed_min", type=float, default=0.3,
+    p.add_argument("--scatter_speed_min", type=float, default=0.4,
                    help="Min outward scatter speed (m/s).")
-    p.add_argument("--scatter_speed_max", type=float, default=0.8,
+    p.add_argument("--scatter_speed_max", type=float, default=1.0,
                    help="Max outward scatter speed (m/s).")
-    p.add_argument("--scatter_steps", type=int, default=100,
+    p.add_argument("--scatter_angular_speed_max", type=float, default=3.0,
+                   help="Max yaw spin imparted at scatter time (rad/s). "
+                        "Pieces settle at random orientations, requiring "
+                        "rotation as well as translation to reassemble.")
+    p.add_argument("--scatter_direction_noise", type=float, default=0.35,
+                   help="Std-dev of isotropic noise added to outward scatter "
+                        "direction before normalisation. Higher values make "
+                        "scatter less radially predictable.")
+    p.add_argument("--scatter_steps", type=int, default=150,
                    help="Physics steps while applying scatter velocity.")
-    p.add_argument("--settle_steps", type=int, default=200,
+    p.add_argument("--settle_steps", type=int, default=350,
                    help="Physics steps to let pieces settle after scatter.")
     p.add_argument("--seed", type=int, default=0,
                    help="Base random seed for reproducibility.")
@@ -373,6 +402,8 @@ def main():
                 env, rng,
                 speed_min=args.scatter_speed_min,
                 speed_max=args.scatter_speed_max,
+                angular_speed_max=args.scatter_angular_speed_max,
+                direction_noise=args.scatter_direction_noise,
                 scatter_steps=args.scatter_steps,
                 settle_steps=args.settle_steps,
             )
@@ -438,6 +469,8 @@ def main():
         num_points_max=args.num_points_max,
         scatter_speed_min=args.scatter_speed_min,
         scatter_speed_max=args.scatter_speed_max,
+        scatter_angular_speed_max=args.scatter_angular_speed_max,
+        scatter_direction_noise=args.scatter_direction_noise,
         scatter_steps=args.scatter_steps,
         settle_steps=args.settle_steps,
         seed=args.seed,

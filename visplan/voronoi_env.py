@@ -233,6 +233,45 @@ class VoronoiReassembly(ManiSkillEnvUtils, BaseEnv):
             self.scene.px.gpu_update_articulation_kinematics()
             self.scene._gpu_fetch_all()
 
+    def set_piece_angular_velocities(self, angular_velocities: torch.Tensor, piece_indices: list = None):
+        """
+        Set angular velocities for one or more polygon pieces simultaneously.
+
+        Args:
+            angular_velocities: Tensor of shape (M, N, 3) where
+                M = number of pieces to control
+                N = num_envs
+                3 = (wx, wy, wz) in rad/s
+                Also accepts (N, 3) which is treated as M=1.
+            piece_indices: List of M integer indices into self.actors specifying
+                which pieces to control. If None, controls pieces 0..M-1.
+        """
+        if not isinstance(angular_velocities, torch.Tensor):
+            angular_velocities = torch.tensor(angular_velocities, dtype=torch.float32, device=self.device)
+
+        if angular_velocities.ndim == 2:
+            angular_velocities = angular_velocities.unsqueeze(0)  # (N, 3) -> (1, N, 3)
+
+        M = angular_velocities.shape[0]
+
+        if piece_indices is None:
+            piece_indices = list(range(M))
+
+        assert len(piece_indices) == M, (
+            f"piece_indices length ({len(piece_indices)}) must match M ({M})"
+        )
+        assert all(0 <= i < self.num_pieces for i in piece_indices), (
+            f"piece_indices must be in [0, {self.num_pieces}), got {piece_indices}"
+        )
+
+        for j, idx in enumerate(piece_indices):
+            self.actors[idx].set_angular_velocity(angular_velocities[j])
+
+        if self.gpu_sim_enabled:
+            self.scene._gpu_apply_all()
+            self.scene.px.gpu_update_articulation_kinematics()
+            self.scene._gpu_fetch_all()
+
     def sim_step(self, steps: int = 50):
         """Step physics without sending any robot action."""
         zero_action = torch.zeros(self.num_envs, self.action_space.shape[-1], device=self.device)
