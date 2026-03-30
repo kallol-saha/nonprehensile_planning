@@ -3,6 +3,7 @@
 import gymnasium as gym
 import numpy as np
 import torch
+import cv2
 
 # The import registers the environment with gymnasium
 import visplan.voronoi_env  # noqa: F401
@@ -12,11 +13,12 @@ def main():
     print("Creating VoronoiReassembly-v1 environment...")
     env = gym.make(
         "VoronoiReassembly-v1",
-        parallel_in_single_scene=False,
+        parallel_in_single_scene=True,
+        obs_mode="state",
         viewer_camera_configs=dict(shader_pack="rt-fast"),
-        num_envs=2,
+        num_envs=64,
         render_mode="human",
-        num_voronoi_points=4,
+        num_voronoi_points=8,
         side_length=0.2,
         placement_mode="assembled",
         voronoi_seed=1,
@@ -33,7 +35,12 @@ def main():
         action = env.action_space.sample()
         obs, reward, terminated, truncated, info = env.step(action)
 
-    env.render()
+    # env.render()
+    img = env.get_top_view()
+    
+    # Save the image for viewing
+    cv2.imwrite("top_view.png", cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+    print("Saved top_view.png")
     
     speed = 0.5
     for i, (cx, cy) in enumerate(env.centroids):
