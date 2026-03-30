@@ -15,6 +15,13 @@ from mani_skill.utils import sapien_utils
 
 from visplan.generation_utils import generate_voronoi_meshes, save_voronoi_assets
 from visplan.env_utils import ManiSkillEnvUtils
+from scipy.spatial.transform import Rotation as R
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from matplotlib.patches import Polygon as MplPolygon
+from matplotlib.collections import PatchCollection
+from shapely.geometry import Polygon as ShapelyPolygon
 
 
 @register_env("VoronoiReassembly-v1", max_episode_steps=10000)
@@ -53,6 +60,10 @@ class VoronoiReassembly(ManiSkillEnvUtils, BaseEnv):
     #  Asset generation
     # ------------------------------------------------------------------ #
 
+    def _after_simulation_step(self):
+        pass
+        # This is where we should save the top view image and track the environment.
+   
     def _generate_voronoi_assets(self):
         """Pre-generate Voronoi polygon meshes, OBJs, and URDFs."""
         self.meshes, self.centroids = generate_voronoi_meshes(
@@ -71,6 +82,17 @@ class VoronoiReassembly(ManiSkillEnvUtils, BaseEnv):
 
         self.num_pieces = len(self.meshes)
         self.piece_names = [f"polygon_{i}" for i in range(self.num_pieces)]
+
+        # Store colors (same RNG as save_voronoi_assets)
+        self.piece_colors = np.random.RandomState(self.voronoi_seed + 42).rand(self.num_pieces, 3)
+
+        # Store 2D convex hull vertices for each piece (in local frame, centered at origin)
+        self._piece_local_verts = []
+        for mesh in self.meshes:
+            xy = mesh.vertices[:, :2]
+            hull = ShapelyPolygon(xy).convex_hull
+            verts = np.array(hull.exterior.coords)  # (K, 2), closed polygon
+            self._piece_local_verts.append(verts)
 
     # ------------------------------------------------------------------ #
     #  ManiSkill config hooks
@@ -272,13 +294,87 @@ class VoronoiReassembly(ManiSkillEnvUtils, BaseEnv):
             self.scene.px.gpu_update_articulation_kinematics()
             self.scene._gpu_fetch_all()
 
-    def sim_step(self, steps: int = 50):
-        """Step physics without sending any robot action."""
+    def sim_step(self, steps: int = 50, capture_every: int = 0, image_size: int = 256):
+        """Step physics without sending any robot action.
+
+        Args:
+            steps: Number of physics steps to run.
+            capture_every: If > 0, capture a top-view frame every this many steps.
+                           If 0 (default), no frames are captured.
+            image_size: Resolution for captured frames.
+
+        Returns:
+            List of captured frames (empty if capture_every == 0).
+        """
+        frames = []
         zero_action = torch.zeros(self.num_envs, self.action_space.shape[-1], device=self.device)
-        for _ in range(steps):
+        for i in range(steps):
             self.step(zero_action)
             if self.render_mode is not None:
                 self.render()
+            if capture_every > 0 and (i + 1) % capture_every == 0:
+                frames.append(self.get_top_view(image_size=image_size))
+        return frames
+
+    # ------------------------------------------------------------------ #
+    #  Top-view observation
+    # ------------------------------------------------------------------ #
+
+    def get_top_view(self, env_idx: int = 0, image_size: int = 256, padding: float = 0.40):
+        """
+        Render a top-down 2D image of the polygon pieces using their current poses.
+        Does not use the simulation renderer. View bounds auto-expand to fit all pieces.
+
+        Args:
+            env_idx: Which parallel env to render.
+            image_size: Output image resolution (square).
+            padding: Extra margin around the view bounds in meters.
+
+        Returns:
+            image: np.ndarray of shape (image_size, image_size, 3), uint8 RGB.
+        """
+        fig, ax = plt.subplots(1, 1, figsize=(image_size / 100, image_size / 100), dpi=100)
+
+        patches = []
+        colors = []
+
+        for i, name in enumerate(self.piece_names):
+            pose = self.get_object_pose(name)  # (num_envs, 7)
+            p = pose[env_idx, :3].cpu().numpy()   # (x, y, z)
+            q = pose[env_idx, 3:].cpu().numpy()   # (w, x, y, z) — SAPIEN convention
+
+            # Extract yaw rotation from quaternion (rotation about Z)
+            rot = R.from_quat([q[1], q[2], q[3], q[0]])  # scipy uses (x, y, z, w)
+            rot_matrix = rot.as_matrix()[:2, :2]  # 2x2 rotation in XY plane
+
+            # Transform local vertices to world frame
+            local_verts = self._piece_local_verts[i][:, :2]  # (K, 2)
+            world_verts = (rot_matrix @ local_verts.T).T + p[:2]
+
+            patch = MplPolygon(world_verts, closed=True)
+            patches.append(patch)
+            colors.append(self.piece_colors[i])
+
+        collection = PatchCollection(patches, facecolors=colors, edgecolors='black', linewidths=0.5)
+        ax.add_collection(collection)
+
+        # Fixed view bounds
+        bound = self.side_length / 2 + padding
+        ax.set_xlim(-bound, bound)
+        ax.set_ylim(-bound, bound)
+        ax.set_aspect('equal')
+        ax.axis('off')
+
+        fig.tight_layout(pad=0)
+        fig.canvas.draw()
+
+        # Convert canvas to numpy array
+        buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
+        w, h = fig.canvas.get_width_height()
+        image = buf.reshape(h, w, 4)[:, :, :3].copy()  # drop alpha
+
+        plt.close(fig)
+        return image
 
     # ------------------------------------------------------------------ #
     #  Reward / evaluation stubs
