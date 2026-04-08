@@ -342,8 +342,17 @@ def parse_args():
 
 def main():
     args = parse_args()
-    os.makedirs(args.output_dir, exist_ok=True)
-    viz_dir = os.path.join(args.output_dir, "viz")
+
+    # Auto-label subfolder so multiple datasets can coexist under output_dir.
+    # Format: ep<N>_pts<min>-<max>_seed<S>
+    subfolder = (
+        f"ep{args.num_episodes}"
+        f"_pts{args.num_points_min}-{args.num_points_max}"
+        f"_seed{args.seed}"
+    )
+    output_dir = os.path.join(args.output_dir, subfolder)
+    os.makedirs(output_dir, exist_ok=True)
+    viz_dir = os.path.join(output_dir, "viz")
     if args.save_viz > 0:
         os.makedirs(viz_dir, exist_ok=True)
 
@@ -354,17 +363,13 @@ def main():
     cam_height = 0.6
     visible_range = cam_height * np.tan(np.pi / 4)  # ≈ 0.6 m
 
-    num_configs = -(-args.num_episodes // args.episodes_per_voronoi)  # ceil div
-
     episode_idx = 0
     skipped = 0
+    cfg_idx = 0  # incremented each time a new Voronoi config is created
 
     pbar = tqdm(total=args.num_episodes, desc="Generating episodes")
 
-    for cfg_idx in range(num_configs):
-        if episode_idx >= args.num_episodes:
-            break
-
+    while episode_idx < args.num_episodes:
         voronoi_seed = args.seed + cfg_idx
         num_points = int(rng.integers(args.num_points_min, args.num_points_max + 1))
 
@@ -393,7 +398,7 @@ def main():
         # ---- Generate scatter episodes --------------------------------
         for _ in range(args.episodes_per_voronoi):
             if episode_idx >= args.num_episodes:
-                break
+                break  # done with this Voronoi config; outer while will also exit
 
             # Reset to assembled, then scatter
             env.reset()
@@ -424,7 +429,7 @@ def main():
             )
 
             # ---- Save episode ------------------------------------------
-            fname = os.path.join(args.output_dir, f"episode_{episode_idx:06d}.npz")
+            fname = os.path.join(output_dir, f"episode_{episode_idx:06d}.npz")
             save_dict = dict(
                 start_image=start_image,
                 goal_image=goal_image,
@@ -456,6 +461,7 @@ def main():
             pbar.update(1)
 
         env.close()
+        cfg_idx += 1
 
     pbar.close()
 
@@ -477,10 +483,10 @@ def main():
         total_episodes=episode_idx,
         skipped=skipped,
     )
-    with open(os.path.join(args.output_dir, "config.json"), "w") as f:
+    with open(os.path.join(output_dir, "config.json"), "w") as f:
         json.dump(meta, f, indent=2)
 
-    print(f"\nDone – {episode_idx} episodes saved to {args.output_dir}"
+    print(f"\nDone – {episode_idx} episodes saved to {output_dir}"
           f" ({skipped} scattered states skipped)")
 
 
