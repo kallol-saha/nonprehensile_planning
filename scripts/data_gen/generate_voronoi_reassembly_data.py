@@ -3,7 +3,7 @@
 For each episode this script:
   1. Creates a random Voronoi tessellation of a square (varying seed & point count)
   2. Records the goal (assembled) state
-  3. Scatters pieces outward via physics-based velocity perturbations
+  3. Scatters pieces outward via physics-based edge-force pushes
   4. Records the start (scattered) state with overhead image and per-piece masks
   5. Generates per-piece SE(2) trajectories via linear interpolation
   6. Saves everything to disk as a compressed .npz
@@ -187,52 +187,254 @@ def interpolate_se2(start, goal, T):
 #  Physics-based scattering
 # ------------------------------------------------------------------ #
 
-def scatter_pieces(env, rng,
-                   speed_min=0.4, speed_max=1.0,
-                   angular_speed_max=3.0,
-                   direction_noise=0.35,
-                   scatter_steps=150, settle_steps=350):
-    """Push and spin every piece outward from the centre, then let physics settle.
+def compute_edge_push_force(outline, pose_se2, outward_direction, force_magnitude, rng):
+    """Select a push edge and return the force vector and world-frame application point.
 
-    Each piece receives:
-      - A linear velocity directed roughly outward from its centroid, with
-        isotropic directional noise controlled by ``direction_noise`` (σ).
-      - A random yaw (ωz) angular velocity in ``[-angular_speed_max,
-        +angular_speed_max]`` rad/s, so pieces come to rest at arbitrary
-        orientations.  This makes reassembly require both translation *and*
-        rotation, yielding significantly more complex trajectories.
+    Selects uniformly at random from the subset of edges whose inward normal
+    has a positive dot product with ``outward_direction`` (guaranteeing the
+    piece will be propelled outward).  Falls back to the single best-aligned
+    edge if none qualify.
+
+    For a CCW-ordered polygon, the inward normal of the edge from v1 to v2 is
+        n = (-d_y, d_x) / |d|,   where  d = v2 - v1.
+
+    The force is applied at the edge midpoint.  Rotation naturally emerges from
+    the physics engine via the torque  τ = (midpoint - CM) × F  — no manual
+    angular velocity calculation is required.
 
     Args:
-        speed_min:         Minimum outward linear speed (m/s).
-        speed_max:         Maximum outward linear speed (m/s).
-        angular_speed_max: Maximum magnitude of yaw angular velocity (rad/s).
-        direction_noise:   Standard deviation of isotropic noise added to the
-                           outward scatter direction before normalisation.
-        scatter_steps:     Physics steps during which velocities are active.
-        settle_steps:      Physics steps to let pieces come to rest afterward.
+        outline:          (V, 2) CCW-ordered local-frame polygon vertices
+                          (no closing/repeated vertex).
+        pose_se2:         [x, y, theta] current world-frame SE(2) pose.
+        outward_direction:(2,) unit vector for the desired outward direction in
+                          world frame (used only for edge filtering, may be noisy).
+        force_magnitude:  Magnitude of the applied force in Newtons.
+        rng:              numpy Generator (for reproducible edge selection).
+
+    Returns:
+        force_world: (3,) ndarray [Fx, Fy, 0.0] force vector in world frame (N).
+        midpoint_xy: (2,) ndarray world-frame XY position of the edge midpoint.
+        edge_world:  (2, 2) ndarray world-frame [v1, v2] endpoints of the chosen
+                     edge, for visualisation.  None for degenerate polygons.
+    """
+    x, y, theta = pose_se2
+    c_th, s_th = np.cos(theta), np.sin(theta)
+    R_mat = np.array([[c_th, -s_th], [s_th, c_th]])
+    pos = np.array([x, y])
+
+    n_verts = len(outline)
+
+    # Collect per-edge inward normals (world frame), local endpoints, midpoints
+    inward_normals_world = []
+    endpoints_local = []
+    midpoints_local = []
+    dots = []
+
+    for i in range(n_verts):
+        v1 = outline[i]
+        v2 = outline[(i + 1) % n_verts]
+        d = v2 - v1
+        edge_len = np.linalg.norm(d)
+        if edge_len < 1e-10:
+            continue
+        # Inward normal for a CCW polygon (left of travel direction)
+        inward_local = np.array([-d[1], d[0]]) / edge_len
+        inward_world = R_mat @ inward_local
+        dot = float(np.dot(inward_world, outward_direction))
+        inward_normals_world.append(inward_world)
+        endpoints_local.append((v1, v2))
+        midpoints_local.append((v1 + v2) / 2.0)
+        dots.append(dot)
+
+    if len(dots) == 0:
+        # Degenerate polygon – fall back to a centroid-directed force
+        force_world = np.array([outward_direction[0] * force_magnitude,
+                                outward_direction[1] * force_magnitude, 0.0])
+        return force_world, pos.copy(), None
+
+    # Keep only edges that propel the piece outward (dot > 0).
+    # Fall back to the single best edge if none qualify.
+    valid_indices = [i for i, dot in enumerate(dots) if dot > 0.0]
+    if len(valid_indices) == 0:
+        valid_indices = [int(np.argmax(dots))]
+
+    chosen = valid_indices[rng.integers(len(valid_indices))]
+    push_dir_world = inward_normals_world[chosen]
+    midpoint_local = midpoints_local[chosen]
+    v1_local, v2_local = endpoints_local[chosen]
+
+    # Edge endpoints in world frame (XY only — for visualisation)
+    edge_world = np.array([
+        (R_mat @ v1_local) + pos,
+        (R_mat @ v2_local) + pos,
+    ])  # (2, 2)
+
+    # Edge midpoint in world frame (XY)
+    midpoint_xy = (R_mat @ midpoint_local) + pos  # (2,)
+
+    # Force along the chosen edge's inward normal
+    force_world = np.array([push_dir_world[0] * force_magnitude,
+                            push_dir_world[1] * force_magnitude, 0.0])
+
+    return force_world, midpoint_xy, edge_world
+
+
+def apply_force_at_world_point(uw, actor, force_3d, point_xy, piece_z):
+    """Apply a 3-D force at a world XY point on an actor for one physics step.
+
+    Decomposes the off-centre force into:
+      • A linear force applied at the CM  (via actor.apply_force)
+      • A torque  τ = r × F  (r = application point − CM)  to match the
+        physical effect of contacting the body at that point.
+
+    For GPU simulation this writes directly to ``cuda_rigid_body_torque`` and
+    calls ``gpu_apply_rigid_dynamic_torque()``.  For CPU simulation it uses
+    ``body.add_force_at_point()`` which handles the decomposition internally.
+
+    Args:
+        uw:         Unwrapped VoronoiReassembly env.
+        actor:      The ManiSkill Actor to push.
+        force_3d:   (3,) ndarray force in world frame [Fx, Fy, Fz] (Newtons).
+        point_xy:   (2,) ndarray XY world position of the application point.
+        piece_z:    Z coordinate (metres) to use for the application point.
+                    Pass the current CM z so the moment arm has no z-component,
+                    keeping the induced torque purely about the Z axis.
+    """
+    point_3d = np.array([point_xy[0], point_xy[1], piece_z], dtype=np.float64)
+    force_np = np.asarray(force_3d, dtype=np.float64)
+
+    if uw.gpu_sim_enabled:
+        # --- Linear force at CM ---
+        force_t = torch.tensor(force_np, dtype=torch.float32,
+                               device=uw.device).unsqueeze(0)  # (1, 3)
+        actor.apply_force(force_t)  # calls gpu_apply_rigid_dynamic_force internally
+
+        # --- Torque from off-centre application: τ = r × F ---
+        cm_pos = actor.pose.p[0].cpu().numpy()  # (3,) world CM position
+        r = point_3d - cm_pos
+        torque = np.cross(r, force_np)
+        torque_t = torch.tensor(torque, dtype=torch.float32,
+                                device=uw.device).unsqueeze(0)  # (1, 3)
+        uw.scene.px.cuda_rigid_body_torque.torch()[
+            actor._body_data_index, :3
+        ] = torque_t
+        uw.scene.px.gpu_apply_rigid_dynamic_torque()
+    else:
+        # CPU: physx body handles force-at-point → force + torque decomposition
+        for body in actor._bodies:
+            body.add_force_at_point(force=force_np.tolist(),
+                                    point=point_3d.tolist())
+
+
+def scatter_pieces(env, outlines, rng,
+                   force_min=5.0, force_max=15.0,
+                   direction_noise=0.35,
+                   scatter_steps=150, settle_steps=350,
+                   non_target_threshold=10):
+    """Scatter each piece via a physics-based edge push, one piece at a time.
+
+    For each piece i the function:
+      1. Computes a desired outward direction from the assembly centre,
+         perturbed with Gaussian noise (σ = ``direction_noise``) and re-normalised.
+      2. Selects a random edge of piece i whose inward normal has a positive
+         component along that outward direction (so the push propels the piece
+         outward rather than inward).
+      3. Applies a constant force at the edge midpoint for ``scatter_steps``
+         physics steps, then allows ``settle_steps`` steps to settle.
+         Rotation naturally emerges from the off-centre torque τ = r × F.
+      4. Compares all-object poses before and after: if any non-target piece
+         moved more than ``non_target_threshold`` metres, the episode is
+         considered invalid and the function returns False immediately.
+
+    Pieces are scattered sequentially (not simultaneously) so that each
+    push can be checked in isolation.
+
+    Args:
+        env:                    Gymnasium wrapper around VoronoiReassembly.
+        outlines:               list of (V_i, 2) CCW local-frame vertex arrays,
+                                one per piece (no closing vertex).
+        rng:                    numpy Generator for reproducibility.
+        force_min / force_max:  Force magnitude range (Newtons).
+        direction_noise:        Std-dev of Gaussian noise added to the clean
+                                outward direction before edge selection.
+        scatter_steps:          Physics steps during which force is applied.
+        settle_steps:           Physics steps to let the piece settle after push.
+        non_target_threshold:   Maximum allowed position displacement (metres)
+                                of any non-target piece per push.
+
+    Returns:
+        valid (bool): True if every push caused no collateral displacement
+                      exceeding ``non_target_threshold``; False means the
+                      episode should be discarded.
+        pushed_edges (list[np.ndarray | None]): One (2, 2) world-frame edge
+                      array per piece (or None for degenerate pieces).
+                      Empty list if valid is False.
     """
     uw = env.unwrapped
-    for i, (cx, cy) in enumerate(uw.centroids):
-        # --- linear velocity: outward from centroid + directional noise ---
-        direction = np.array([cx, cy, 0.0])
-        direction[:2] += rng.normal(0, direction_noise, size=2)
-        norm = np.linalg.norm(direction)
-        if norm < 1e-8:
-            direction = np.array([rng.normal(), rng.normal(), 0.0])
-            norm = np.linalg.norm(direction)
-        direction /= norm
+    pushed_edges = []
+    zero_action = torch.zeros(uw.num_envs, uw.action_space.shape[-1], device=uw.device)
 
-        speed = rng.uniform(speed_min, speed_max)
-        lin_vel = torch.tensor(direction * speed, dtype=torch.float32).unsqueeze(0)
-        uw.set_piece_velocities(lin_vel, piece_indices=[i])
+    for i in range(uw.num_pieces):
+        # Current SE(2) pose of this piece
+        p7 = uw.get_object_pose(uw.piece_names[i]).cpu().numpy()[0]
+        pose_se2 = [p7[0], p7[1], quat_to_yaw(p7[3:7])]
+        piece_z = float(p7[2])
 
-        # --- angular velocity: random yaw spin ---
-        omega_z = rng.uniform(-angular_speed_max, angular_speed_max)
-        ang_vel = torch.tensor([[0.0, 0.0, omega_z]], dtype=torch.float32)
-        uw.set_piece_angular_velocities(ang_vel, piece_indices=[i])
+        # Clean outward direction (from assembly centre toward original centroid)
+        cx, cy = uw.centroids[i]
+        outward = np.array([cx, cy], dtype=float)
+        outward_norm = np.linalg.norm(outward)
+        if outward_norm < 1e-8:
+            # Centroid is at the origin; choose a random direction
+            outward = rng.standard_normal(2)
+            outward /= np.linalg.norm(outward)
+        else:
+            outward /= outward_norm
 
-    uw.sim_step(scatter_steps)
-    uw.sim_step(settle_steps)
+        force_magnitude = float(rng.uniform(force_min, force_max))
+
+        # Add directional noise then re-normalise.  Edge filtering still uses
+        # this (noisy) direction, so both the chosen edge and the moment-arm
+        # contribute diversity to the resulting motion.
+        noisy_outward = outward + rng.standard_normal(2) * direction_noise
+        noisy_norm = np.linalg.norm(noisy_outward)
+        if noisy_norm < 1e-8:
+            noisy_outward = outward
+        else:
+            noisy_outward /= noisy_norm
+
+        force_world, midpoint_xy, edge_world = compute_edge_push_force(
+            outlines[i], pose_se2, noisy_outward, force_magnitude, rng
+        )
+        pushed_edges.append(edge_world)
+
+        # Record all object poses BEFORE the push
+        poses_before = uw.object_poses_tensor.clone()
+
+        # Apply force at edge midpoint each physics step for scatter_steps steps.
+        # Call uw.step() (unwrapped) to avoid triggering the gymnasium wrapper's
+        # auto-reset when max_episode_steps is reached.
+        for _ in range(scatter_steps):
+            apply_force_at_world_point(uw, uw.actors[i], force_world, midpoint_xy, piece_z)
+            uw.step(zero_action)
+
+        # Let the piece settle (no force applied)
+        uw.sim_step(settle_steps)
+
+        # Record all object poses AFTER settle
+        poses_after = uw.object_poses_tensor.clone()
+
+        # Check whether any non-target piece was displaced beyond the threshold
+        exceeded = uw.non_target_objects_moved_beyond_threshold(
+            poses_before,
+            poses_after,
+            uw.actors[i],
+            non_target_threshold,
+        )
+        if exceeded.any().item():
+            return False, []  # Collateral movement detected – discard episode
+
+    return True, pushed_edges  # All pushes clean
 
 
 def validate_poses(env, xy_bound=0.45):
@@ -252,15 +454,42 @@ def validate_poses(env, xy_bound=0.45):
 def save_episode_visualization(start_image, goal_image, piece_masks,
                                trajectories, outlines, start_poses,
                                goal_poses, image_size, visible_range,
-                               colors, output_path):
+                               colors, output_path, pushed_edges=None):
     """Save a composite debug visualisation for one episode.
 
     Layout (left to right):
-      - Start image with trajectory waypoints overlaid
-      - Goal image
+      - Goal (assembled) image with pushed edges highlighted
+      - Start (scattered) image with trajectory waypoints overlaid
       - Montage of per-piece masks
+
+    Args:
+        pushed_edges: list of (2, 2) world-frame edge endpoints per piece
+                      (as returned by scatter_pieces), or None to skip.
     """
-    # --- trajectory overlay on start image ---
+    # --- goal image: highlight pushed edges in assembled configuration ---
+    goal_viz = goal_image.copy()
+    if pushed_edges is not None:
+        for i, edge in enumerate(pushed_edges):
+            if edge is None:
+                continue
+            ep = world_to_pixel(edge, image_size, visible_range)  # (2, 2)
+            cv2.line(goal_viz, tuple(ep[0]), tuple(ep[1]), (255, 255, 255), 3)
+            # Arrow from edge midpoint outward (using goal pose as centroid)
+            mid_w = edge.mean(axis=0)
+            cx_w = float(goal_poses[i, 0])
+            cy_w = float(goal_poses[i, 1])
+            push_dir = mid_w - np.array([cx_w, cy_w])
+            push_norm = np.linalg.norm(push_dir)
+            if push_norm > 1e-8:
+                push_dir /= push_norm
+                arrow_len_m = 0.03  # 3 cm arrow
+                mid_px = world_to_pixel(mid_w[None], image_size, visible_range)[0]
+                tip_world = mid_w + push_dir * arrow_len_m
+                tip_px = world_to_pixel(tip_world[None], image_size, visible_range)[0]
+                cv2.arrowedLine(goal_viz, tuple(mid_px), tuple(tip_px),
+                                (255, 255, 255), 2, tipLength=0.4)
+
+    # --- start image: trajectory waypoints only ---
     traj_img = start_image.copy()
     for i in range(len(outlines)):
         color = colors[i]
@@ -287,7 +516,7 @@ def save_episode_visualization(start_image, goal_image, piece_masks,
     montage = cv2.resize(montage, (image_size, image_size), interpolation=cv2.INTER_NEAREST)
 
     # --- compose ---
-    composite = np.concatenate([traj_img, goal_image, montage], axis=1)
+    composite = np.concatenate([goal_viz, traj_img, montage], axis=1)
     cv2.imwrite(output_path, composite)
 
 
@@ -317,22 +546,24 @@ def parse_args():
                    help="Number of timesteps per trajectory.")
     p.add_argument("--image_size", type=int, default=256,
                    help="Resolution of overhead images and masks.")
-    p.add_argument("--scatter_speed_min", type=float, default=0.4,
-                   help="Min outward scatter speed (m/s).")
-    p.add_argument("--scatter_speed_max", type=float, default=1.0,
-                   help="Max outward scatter speed (m/s).")
-    p.add_argument("--scatter_angular_speed_max", type=float, default=3.0,
-                   help="Max yaw spin imparted at scatter time (rad/s). "
-                        "Pieces settle at random orientations, requiring "
-                        "rotation as well as translation to reassemble.")
+    p.add_argument("--scatter_force_min", type=float, default=5.0,
+                   help="Min force magnitude applied to scatter each piece (Newtons).")
+    p.add_argument("--scatter_force_max", type=float, default=15.0,
+                   help="Max force magnitude applied to scatter each piece (Newtons).")
     p.add_argument("--scatter_direction_noise", type=float, default=0.35,
-                   help="Std-dev of isotropic noise added to outward scatter "
+                   help="Std-dev of Gaussian noise added to the outward scatter "
                         "direction before normalisation. Higher values make "
                         "scatter less radially predictable.")
     p.add_argument("--scatter_steps", type=int, default=150,
-                   help="Physics steps while applying scatter velocity.")
+                   help="Physics steps while applying scatter velocity per piece.")
     p.add_argument("--settle_steps", type=int, default=350,
-                   help="Physics steps to let pieces settle after scatter.")
+                   help="Physics steps to let each piece settle after its push. "
+                        "Because pieces are scattered one at a time, total physics "
+                        "steps per episode ≈ num_pieces × (scatter_steps + settle_steps).")
+    p.add_argument("--non_target_threshold", type=float, default=0.005,
+                   help="Maximum allowed position displacement (metres) of any "
+                        "non-target piece during a push.  Episodes where any push "
+                        "knocks a bystander piece beyond this distance are discarded.")
     p.add_argument("--seed", type=int, default=0,
                    help="Base random seed for reproducibility.")
     p.add_argument("--save_viz", type=int, default=0,
@@ -384,12 +615,16 @@ def main():
             voronoi_seed=voronoi_seed,
         )
 
+        print("DEBUG: Created environment with Voronoi seed", voronoi_seed)
+
         outlines = get_polygon_outlines(env.unwrapped.meshes)
         colors = _piece_colors(env.unwrapped.num_pieces, seed=voronoi_seed)
 
         # ---- Record goal (assembled) state -----------------------------
         env.reset()
         env.unwrapped.sim_step(50)  # let pieces settle onto the table
+
+        print("DEBUG: Recorded goal state for Voronoi seed", voronoi_seed)
         goal_poses = get_piece_poses(env)
         goal_image = render_overhead(
             outlines, goal_poses, args.image_size, visible_range, colors,
@@ -397,25 +632,30 @@ def main():
 
         # ---- Generate scatter episodes --------------------------------
         for _ in range(args.episodes_per_voronoi):
+            print("DEBUG: Scattering pieces for episode", episode_idx, "with Voronoi seed", voronoi_seed)
             if episode_idx >= args.num_episodes:
                 break  # done with this Voronoi config; outer while will also exit
 
-            # Reset to assembled, then scatter
+            # Reset to assembled, then scatter one piece at a time
             env.reset()
             env.unwrapped.sim_step(50)
-            scatter_pieces(
-                env, rng,
-                speed_min=args.scatter_speed_min,
-                speed_max=args.scatter_speed_max,
-                angular_speed_max=args.scatter_angular_speed_max,
+            print("DEBUG: Environment reset to assembled for episode", episode_idx)
+            scatter_valid, pushed_edges = scatter_pieces(
+                env, outlines, rng,
+                force_min=args.scatter_force_min,
+                force_max=args.scatter_force_max,
                 direction_noise=args.scatter_direction_noise,
                 scatter_steps=args.scatter_steps,
                 settle_steps=args.settle_steps,
+                non_target_threshold=args.non_target_threshold,
             )
+            print("DEBUG: Scatter completed for episode", episode_idx, "valid =", scatter_valid)
 
-            if not validate_poses(env):
-                skipped += 1
-                continue
+            # if not scatter_valid or not validate_poses(env):
+            #     skipped += 1
+            #     continue
+
+            print("DEBUG: Recording start state for episode", episode_idx)
 
             start_poses = get_piece_poses(env)
             start_image = render_overhead(
@@ -455,6 +695,7 @@ def main():
                     trajectories, outlines, start_poses, goal_poses,
                     args.image_size, visible_range, colors,
                     os.path.join(viz_dir, f"episode_{episode_idx:06d}.png"),
+                    pushed_edges=pushed_edges,
                 )
 
             episode_idx += 1
@@ -473,12 +714,12 @@ def main():
         visible_range=float(visible_range),
         num_points_min=args.num_points_min,
         num_points_max=args.num_points_max,
-        scatter_speed_min=args.scatter_speed_min,
-        scatter_speed_max=args.scatter_speed_max,
-        scatter_angular_speed_max=args.scatter_angular_speed_max,
+        scatter_force_min=args.scatter_force_min,
+        scatter_force_max=args.scatter_force_max,
         scatter_direction_noise=args.scatter_direction_noise,
         scatter_steps=args.scatter_steps,
         settle_steps=args.settle_steps,
+        non_target_threshold=args.non_target_threshold,
         seed=args.seed,
         total_episodes=episode_idx,
         skipped=skipped,

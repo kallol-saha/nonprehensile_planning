@@ -165,6 +165,11 @@ class VoronoiReassembly(ManiSkillEnvUtils, BaseEnv):
             self.object_ids[name] = actor.per_scene_id[0].item()
             self.actors.append(actor)
 
+        # Aliases required by ManiSkillEnvUtils (object_poses_tensor,
+        # non_target_objects_moved_beyond_threshold, etc.)
+        self.object_names = self.piece_names
+        self.num_objects = self.num_pieces
+
     # ------------------------------------------------------------------ #
     #  Episode initialization
     # ------------------------------------------------------------------ #

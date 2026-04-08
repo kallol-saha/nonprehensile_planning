@@ -533,7 +533,53 @@ class ManiSkillEnvUtils:
         object_poses_to_match = final_object_poses[env_with_min_error]
 
         self.set_object_poses_tensor(object_poses_to_match)
-    
 
-        
-    
+    def non_target_objects_moved_beyond_threshold(
+        self,
+        poses_before: torch.Tensor,
+        poses_after: torch.Tensor,
+        target_object,
+        threshold: float,
+    ) -> torch.Tensor:
+        """Check whether any non-target object moved more than `threshold` metres
+        between poses_before and poses_after (position change only).
+
+        Args:
+            poses_before: (num_envs, num_objects, 7) tensor of object poses before action.
+            poses_after:  (num_envs, num_objects, 7) tensor of object poses after action.
+            target_object: str (object name) or actor object whose movement is ignored.
+            threshold:     Position displacement threshold in metres.
+
+        Returns:
+            (num_envs,) bool tensor. True if any non-target object's position changed
+            by more than `threshold` metres.
+        """
+        if isinstance(target_object, str):
+            target_name = target_object
+        else:
+            target_name = target_object.name
+
+        if target_name not in self.object_names:
+            raise ValueError(
+                f"Target object '{target_name}' not found in object_names: {self.object_names}"
+            )
+
+        target_idx = self.object_names.index(target_name)
+
+        num_objects = poses_before.shape[1]
+        non_target_indices = [i for i in range(num_objects) if i != target_idx]
+
+        if len(non_target_indices) == 0:
+            # Only one object; nothing else to check.
+            return torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+
+        # (num_envs, K, 3) — positions only
+        non_target_before = poses_before[:, non_target_indices, :3]
+        non_target_after  = poses_after[:,  non_target_indices, :3]
+
+        # L2 position displacement per object per env → (num_envs, K)
+        pos_delta = torch.norm(non_target_after - non_target_before, dim=-1)
+
+        # True for any env where at least one non-target exceeded the threshold
+        exceeded = (pos_delta > threshold).any(dim=-1)  # (num_envs,)
+        return exceeded
