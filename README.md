@@ -1,3 +1,13 @@
+## Checkpoints:
+
+Download checkpoints from:
+https://drive.google.com/drive/folders/1tQL5PcfMhxUsPQ5GsVIWxYDf8uwdd00D?usp=sharing
+
+
+
+
+
+
 # Planning from Point Clouds over Continuous Actions for Multi-object Rearrangement
 
 ## Table of Contents
