@@ -327,9 +327,9 @@ def apply_force_at_world_point(uw, actor, force_3d, point_xy, piece_z):
 
 
 def scatter_pieces(env, outlines, rng,
-                   force_min=5.0, force_max=15.0,
+                   force_min=0.025, force_max=0.005,
                    direction_noise=0.35,
-                   scatter_steps=150, settle_steps=350,
+                   scatter_steps=1, settle_steps=35,
                    non_target_threshold=10):
     """Scatter each piece via a physics-based edge push, one piece at a time.
 
@@ -432,6 +432,7 @@ def scatter_pieces(env, outlines, rng,
             non_target_threshold,
         )
         if exceeded.any().item():
+            print(f"DEBUG: Push of piece {i} caused non-target displacement beyond threshold")
             return False, []  # Collateral movement detected – discard episode
 
     return True, pushed_edges  # All pushes clean
@@ -651,9 +652,9 @@ def main():
             )
             print("DEBUG: Scatter completed for episode", episode_idx, "valid =", scatter_valid)
 
-            # if not scatter_valid or not validate_poses(env):
-            #     skipped += 1
-            #     continue
+            if not scatter_valid or not validate_poses(env):
+                skipped += 1
+                continue
 
             print("DEBUG: Recording start state for episode", episode_idx)
 

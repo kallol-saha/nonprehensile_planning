@@ -579,6 +579,7 @@ class ManiSkillEnvUtils:
 
         # L2 position displacement per object per env → (num_envs, K)
         pos_delta = torch.norm(non_target_after - non_target_before, dim=-1)
+        print("DEBUG: pos_delta", pos_delta)
 
         # True for any env where at least one non-target exceeded the threshold
         exceeded = (pos_delta > threshold).any(dim=-1)  # (num_envs,)
