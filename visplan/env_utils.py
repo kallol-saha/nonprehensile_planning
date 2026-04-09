@@ -563,6 +563,8 @@ class ManiSkillEnvUtils:
             raise ValueError(
                 f"Target object '{target_name}' not found in object_names: {self.object_names}"
             )
+        
+        print("DEBUG: num objects", poses_before.shape[1])
 
         target_idx = self.object_names.index(target_name)
 

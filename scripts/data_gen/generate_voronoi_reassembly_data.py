@@ -214,8 +214,9 @@ def compute_edge_push_force(outline, pose_se2, outward_direction, force_magnitud
     Returns:
         force_world: (3,) ndarray [Fx, Fy, 0.0] force vector in world frame (N).
         midpoint_xy: (2,) ndarray world-frame XY position of the edge midpoint.
-        edge_world:  (2, 2) ndarray world-frame [v1, v2] endpoints of the chosen
-                     edge, for visualisation.  None for degenerate polygons.
+        edge_local:  (2, 2) ndarray local-frame [v1, v2] endpoints of the chosen
+                     edge, for visualisation (reprojected via goal pose).  None for
+                     degenerate polygons.
     """
     x, y, theta = pose_se2
     c_th, s_th = np.cos(theta), np.sin(theta)
@@ -263,11 +264,8 @@ def compute_edge_push_force(outline, pose_se2, outward_direction, force_magnitud
     midpoint_local = midpoints_local[chosen]
     v1_local, v2_local = endpoints_local[chosen]
 
-    # Edge endpoints in world frame (XY only — for visualisation)
-    edge_world = np.array([
-        (R_mat @ v1_local) + pos,
-        (R_mat @ v2_local) + pos,
-    ])  # (2, 2)
+    # Edge endpoints in local frame (for visualisation, reprojected at viz time)
+    edge_local = np.array([v1_local, v2_local])  # (2, 2)
 
     # Edge midpoint in world frame (XY)
     midpoint_xy = (R_mat @ midpoint_local) + pos  # (2,)
@@ -276,7 +274,7 @@ def compute_edge_push_force(outline, pose_se2, outward_direction, force_magnitud
     force_world = np.array([push_dir_world[0] * force_magnitude,
                             push_dir_world[1] * force_magnitude, 0.0])
 
-    return force_world, midpoint_xy, edge_world
+    return force_world, midpoint_xy, edge_local
 
 
 def apply_force_at_world_point(uw, actor, force_3d, point_xy, piece_z):
@@ -327,10 +325,10 @@ def apply_force_at_world_point(uw, actor, force_3d, point_xy, piece_z):
 
 
 def scatter_pieces(env, outlines, rng,
-                   force_min=0.025, force_max=0.005,
+                   force_min=5.0, force_max=15.0,
                    direction_noise=0.35,
-                   scatter_steps=1, settle_steps=35,
-                   non_target_threshold=10):
+                   scatter_steps=1, settle_steps=350,
+                   non_target_threshold=0.05):
     """Scatter each piece via a physics-based edge push, one piece at a time.
 
     For each piece i the function:
@@ -464,22 +462,27 @@ def save_episode_visualization(start_image, goal_image, piece_masks,
       - Montage of per-piece masks
 
     Args:
-        pushed_edges: list of (2, 2) world-frame edge endpoints per piece
+        pushed_edges: list of (2, 2) local-frame edge endpoints per piece
                       (as returned by scatter_pieces), or None to skip.
     """
     # --- goal image: highlight pushed edges in assembled configuration ---
     goal_viz = goal_image.copy()
     if pushed_edges is not None:
-        for i, edge in enumerate(pushed_edges):
-            if edge is None:
+        for i, edge_local in enumerate(pushed_edges):
+            if edge_local is None:
                 continue
-            ep = world_to_pixel(edge, image_size, visible_range)  # (2, 2)
+            # Re-project local-frame edge into world frame using goal pose so
+            # the highlight aligns exactly with how goal_image was rendered.
+            gx, gy, gtheta = float(goal_poses[i, 0]), float(goal_poses[i, 1]), float(goal_poses[i, 2])
+            c_g, s_g = np.cos(gtheta), np.sin(gtheta)
+            R_g = np.array([[c_g, -s_g], [s_g, c_g]])
+            edge_world = (R_g @ edge_local.T).T + np.array([gx, gy])  # (2, 2)
+
+            ep = world_to_pixel(edge_world, image_size, visible_range)  # (2, 2)
             cv2.line(goal_viz, tuple(ep[0]), tuple(ep[1]), (255, 255, 255), 3)
-            # Arrow from edge midpoint outward (using goal pose as centroid)
-            mid_w = edge.mean(axis=0)
-            cx_w = float(goal_poses[i, 0])
-            cy_w = float(goal_poses[i, 1])
-            push_dir = mid_w - np.array([cx_w, cy_w])
+            # Arrow from edge midpoint outward (away from piece centroid)
+            mid_w = edge_world.mean(axis=0)
+            push_dir = mid_w - np.array([gx, gy])
             push_norm = np.linalg.norm(push_dir)
             if push_norm > 1e-8:
                 push_dir /= push_norm
@@ -555,13 +558,16 @@ def parse_args():
                    help="Std-dev of Gaussian noise added to the outward scatter "
                         "direction before normalisation. Higher values make "
                         "scatter less radially predictable.")
-    p.add_argument("--scatter_steps", type=int, default=150,
-                   help="Physics steps while applying scatter velocity per piece.")
+    p.add_argument("--scatter_steps", type=int, default=1,
+                   help="Physics steps while applying scatter force per piece. "
+                        "With force-based scattering, each step accumulates velocity, "
+                        "so 1 step is a single impulse giving ~F*dt/mass m/s. "
+                        "At 10 N and dt=0.01s on 0.1 kg pieces this is ~1 m/s.")
     p.add_argument("--settle_steps", type=int, default=350,
                    help="Physics steps to let each piece settle after its push. "
                         "Because pieces are scattered one at a time, total physics "
                         "steps per episode ≈ num_pieces × (scatter_steps + settle_steps).")
-    p.add_argument("--non_target_threshold", type=float, default=0.005,
+    p.add_argument("--non_target_threshold", type=float, default=0.05,
                    help="Maximum allowed position displacement (metres) of any "
                         "non-target piece during a push.  Episodes where any push "
                         "knocks a bystander piece beyond this distance are discarded.")
