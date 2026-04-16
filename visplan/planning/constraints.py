@@ -145,12 +145,6 @@ def guidance_gradient(
     x_leaf = x.detach().requires_grad_(True)
 
     cost = compute_guidance_cost(x_leaf, constraints)
-
-    # If cost has no grad_fn (e.g. all constraints fell outside the trajectory
-    # window), backward() would fail — return zeros instead.
-    if not cost.requires_grad:
-        return torch.zeros_like(x)
-
     cost.backward()
 
     grad = x_leaf.grad.detach()  # same shape as x
