@@ -11,6 +11,7 @@ import os
 import time
 
 import torch
+import wandb
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
@@ -46,6 +47,11 @@ def parse_args():
     p.add_argument("--log_every", type=int, default=10)
     p.add_argument("--save_every", type=int, default=50)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--wandb_project", type=str, default="voronoi-reassembly")
+    p.add_argument("--wandb_entity", type=str, default=None)
+    p.add_argument("--wandb_run_name", type=str, default=None)
+    p.add_argument("--no_wandb", action="store_true",
+                   help="Disable wandb logging (enabled by default).")
     return p.parse_args()
 
 
@@ -93,6 +99,16 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
+    use_wandb = not args.no_wandb
+    if use_wandb:
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=args.wandb_run_name or f"{args.model}",
+            config=vars(args),
+            dir=args.output_dir,
+        )
+
     # Data
     train_loader, val_loader = make_dataloaders(
         args.data_dir, batch_size=args.batch_size, val_frac=args.val_frac,
@@ -106,7 +122,11 @@ def main():
     if args.model in ("unet", "dit"):
         model_kwargs["num_diffusion_steps"] = args.diffusion_steps
     model = model_cls(**model_kwargs).to(device)
-    print(f"Model: {args.model} | Params: {count_params(model):,}")
+    n_params = count_params(model)
+    print(f"Model: {args.model} | Params: {n_params:,}")
+    if use_wandb:
+        wandb.summary["num_params"] = n_params
+        wandb.watch(model, log="gradients", log_freq=100)
 
     # Optimizer
     optimizer = AdamW(model.parameters(), lr=args.lr,
@@ -120,9 +140,18 @@ def main():
         val_loss = validate(model, val_loader, device)
         scheduler.step()
         dt = time.time() - t0
+        lr = optimizer.param_groups[0]["lr"]
+
+        if use_wandb:
+            wandb.log({
+                "epoch": epoch,
+                "train/loss": train_loss,
+                "val/loss": val_loss,
+                "lr": lr,
+                "epoch_time_s": dt,
+            }, step=epoch)
 
         if epoch % args.log_every == 1 or epoch == args.epochs:
-            lr = optimizer.param_groups[0]["lr"]
             print(f"Epoch {epoch:4d} | train {train_loss:.5f} | "
                   f"val {val_loss:.5f} | lr {lr:.2e} | {dt:.1f}s")
 
@@ -130,6 +159,9 @@ def main():
             best_val = val_loss
             torch.save(model.state_dict(),
                        os.path.join(args.output_dir, f"{args.model}_best.pt"))
+            if use_wandb:
+                wandb.summary["best_val_loss"] = best_val
+                wandb.summary["best_epoch"] = epoch
 
         if epoch % args.save_every == 0:
             torch.save(model.state_dict(),
@@ -137,6 +169,8 @@ def main():
                                     f"{args.model}_epoch{epoch:04d}.pt"))
 
     print(f"Done. Best val loss: {best_val:.5f}")
+    if use_wandb:
+        wandb.finish()
 
 
 if __name__ == "__main__":
