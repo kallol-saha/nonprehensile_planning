@@ -49,37 +49,15 @@ import glob
 import logging
 import os
 
-import cv2
 import numpy as np
 import torch
 
-from visplan.planning.cbs import run_cbs, run_pp
-from visplan.planning.low_level_planner import LowLevelPlanner
+from visplan.planning.cbs import run_cbs, run_independent, run_pp
+from visplan.planning.low_level_planner import DiffusionLowLevel, LowLevelPlannerProtocol
+from visplan.planning.rrt_low_level import RRTLowLevel
+from visplan.planning.viz_utils import build_conflict_map, piece_colors, render_solo_video
 from visplan.training.models.diffusion_transformer import DiffusionTransformer
 from visplan.training.models.diffusion_unet import DiffusionUNet
-
-
-# ---------------------------------------------------------------------------
-#  Rendering helpers (duplicated here to avoid importing from non-package scripts/)
-# ---------------------------------------------------------------------------
-
-def world_to_pixel(
-    xy: np.ndarray, image_size: int, visible_range: float
-) -> np.ndarray:
-    """Map world (x, y) → pixel (u, v) for an overhead orthographic camera.
-
-    World +x → image right, world +y → image up.  Camera is centred at the
-    origin and ``visible_range`` is the half-extent in metres.
-    """
-    u = (xy[:, 0] + visible_range) / (2.0 * visible_range) * image_size
-    v = (visible_range - xy[:, 1]) / (2.0 * visible_range) * image_size
-    return np.stack([u, v], axis=-1).astype(np.int32)
-
-
-def _piece_colors(n: int, seed: int = 0) -> list:
-    """Return n distinct RGB colours as a list of 3-tuples (uint8)."""
-    rng = np.random.RandomState(seed + 123)
-    return [tuple(int(v) for v in row) for row in rng.randint(80, 220, size=(n, 3))]
 
 
 logging.basicConfig(
@@ -116,15 +94,26 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--split", type=str, default="val",
                    choices=["train", "val", "all"],
                    help="Which data split to evaluate on.")
-    # Model
+    # Low-level planner
+    p.add_argument("--low_level", type=str, default="diffusion",
+                   choices=["diffusion", "rrt"],
+                   help="Low-level planner backend: 'diffusion' (trained model) "
+                        "or 'rrt' (space-time RRT-Connect, no checkpoint needed).")
+    # Model (only required when --low_level diffusion)
     p.add_argument("--model", type=str, default="dit",
                    choices=list(MODEL_REGISTRY),
-                   help="Model architecture to use as the low-level planner.")
-    p.add_argument("--checkpoint", type=str, required=True,
-                   help="Path to model checkpoint (.pt file).")
+                   help="Model architecture (only for --low_level diffusion).")
+    p.add_argument("--checkpoint", type=str, default=None,
+                   help="Path to model checkpoint (.pt file). "
+                        "Required when --low_level diffusion.")
     p.add_argument("--embed_dim", type=int, default=256)
     p.add_argument("--traj_len", type=int, default=32)
     p.add_argument("--diffusion_steps", type=int, default=100)
+    # RRT-specific
+    p.add_argument("--rrt_max_samples", type=int, default=5000,
+                   help="Total node budget per RRT-Connect call.")
+    p.add_argument("--rrt_max_time", type=float, default=10.0,
+                   help="Wall-clock time budget per RRT-Connect call (seconds).")
     # Sampler
     p.add_argument("--use_ddim", action="store_true", default=True,
                    help="Use DDIM sampling (faster).")
@@ -138,8 +127,9 @@ def parse_args() -> argparse.Namespace:
                    help="λ_c: scale of sphere-constraint gradient guidance.")
     # CBS
     p.add_argument("--algorithm", type=str, default="cbs",
-                   choices=["cbs", "pp"],
-                   help="Planning algorithm: 'cbs' (CBS) or 'pp' (MMD-PP).")
+                   choices=["cbs", "pp", "independent"],
+                   help="Planning algorithm: 'cbs' (CBS), 'pp' (MMD-PP), or "
+                        "'independent' (no coordination, each piece planned alone).")
     p.add_argument("--max_nodes", type=int, default=1000,
                    help="Max CT nodes to expand before giving up (CBS only).")
     p.add_argument("--constraint_margin", type=float, default=1.2,
@@ -221,120 +211,24 @@ def denormalise_traj(traj_norm: np.ndarray, visible_range: float) -> np.ndarray:
 
 def run_unconstrained(
     episode_data: dict,
-    planner: LowLevelPlanner,
+    planner: LowLevelPlannerProtocol,
+    outlines: list,
+    visible_range: float,
 ) -> np.ndarray:
     """Sample one trajectory per piece with no constraints (baseline).
+
+    Thin wrapper around run_independent for backward-compatibility.
 
     Returns:
         (N, T, 3) world SE(2) trajectories.
     """
-    from visplan.planning.cbs import _build_scene_batch
-
-    N = int(episode_data["num_pieces"])
-    trajs = []
-    for i in range(N):
-        scene_batch = _build_scene_batch(episode_data, i, planner.device)
-        batch_world = planner.plan_piece(scene_batch, constraints=[])
-        # Pick the first sample as the representative (no conflict info yet)
-        trajs.append(batch_world[0])
-    return np.stack(trajs, axis=0)  # (N, T, 3)
-
-
-# ---------------------------------------------------------------------------
-#  Visualisation
-# ---------------------------------------------------------------------------
-
-def render_comparison_video(
-    episode_data: dict,
-    outlines: list,
-    unconstrained_trajs: np.ndarray,
-    planned_trajs: np.ndarray,
-    visible_range: float,
-    image_size: int,
-    output_path: str,
-    fps: int,
-) -> None:
-    """Save a side-by-side video: unconstrained (left) vs CBS planned (right).
-
-    Each frame shows both sets of trajectories overlaid on the start image,
-    with the current timestep highlighted.  A summary frame (full trajectories)
-    is prepended.
-
-    Args:
-        episode_data:        Raw episode dict (.npz).
-        outlines:            List of N (V_i, 2) polygon outlines.
-        unconstrained_trajs: (N, T, 3) unconstrained trajectories (world metres).
-        planned_trajs:       (N, T, 3) CBS/PP-planned trajectories (world metres).
-        visible_range:       Camera half-extent (metres).
-        image_size:          Pixel resolution.
-        output_path:         Output .mp4 path.
-        fps:                 Video frame rate.
-    """
-    N = int(episode_data["num_pieces"])
-    voronoi_seed = int(episode_data["voronoi_seed"])
-    colors = _piece_colors(N, seed=voronoi_seed)
-
-    start_image = episode_data["start_image"]   # (H, W, 3) uint8
-    goal_image = episode_data["goal_image"]
-
-    T = planned_trajs.shape[1]
-
-    # Video dimensions: two panels side by side
-    video_w = image_size * 2
-    video_h = image_size
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(output_path, fourcc, fps, (video_w, video_h))
-
-    def _draw_all_trajs(base_img: np.ndarray, trajs: np.ndarray,
-                        label: str, step: int | None = None) -> np.ndarray:
-        """Draw trajectories up to ``step`` onto a copy of base_img."""
-        img = base_img.copy()
-        end_t = T if step is None else step + 1
-        for i in range(N):
-            color = colors[i]
-            pts = trajs[i, :end_t, :2]  # (end_t, 2)
-            px = world_to_pixel(pts, image_size, visible_range)
-            for k in range(len(px) - 1):
-                cv2.line(img, tuple(px[k]), tuple(px[k + 1]), color, 2)
-            # Start marker (blue)
-            start_px = world_to_pixel(trajs[i, 0:1, :2], image_size, visible_range)
-            cv2.circle(img, tuple(start_px[0]), 4, (255, 0, 0), -1)
-            # Goal marker (green diamond)
-            goal_px = world_to_pixel(trajs[i, -1:, :2], image_size, visible_range)
-            cv2.drawMarker(img, tuple(goal_px[0]), (0, 200, 0),
-                           cv2.MARKER_DIAMOND, 8, 2)
-            if step is not None and step < T:
-                cur_px = world_to_pixel(
-                    trajs[i, step:step + 1, :2], image_size, visible_range)
-                cv2.circle(img, tuple(cur_px[0]), 5, color, -1)
-        cv2.putText(img, label, (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                    (0, 0, 0), 2)
-        if step is not None:
-            cv2.putText(img, f"t={step}/{T-1}", (5, image_size - 8),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1)
-        return img
-
-    # 1. Summary frame: full trajectories, held for 1 second
-    left_summary = _draw_all_trajs(start_image, unconstrained_trajs, "Unconstrained")
-    right_summary = _draw_all_trajs(start_image, planned_trajs, "CBS Planned")
-    summary_frame = np.concatenate([left_summary, right_summary], axis=1)
-    for _ in range(fps):
-        writer.write(summary_frame)
-
-    # 2. Animated frames
-    for t in range(T):
-        left = _draw_all_trajs(start_image, unconstrained_trajs,
-                               "Unconstrained", step=t)
-        right = _draw_all_trajs(start_image, planned_trajs,
-                                "CBS Planned", step=t)
-        frame = np.concatenate([left, right], axis=1)
-        writer.write(frame)
-
-    # Hold last frame briefly
-    for _ in range(fps // 2):
-        writer.write(frame)
-
-    writer.release()
+    result = run_independent(
+        episode_data=episode_data,
+        outlines=outlines,
+        planner=planner,
+        visible_range=visible_range,
+    )
+    return result.trajectories_world
 
 
 # ---------------------------------------------------------------------------
@@ -382,27 +276,40 @@ def main() -> None:
     logger.info("Device: %s", device)
 
     # ------------------------------------------------------------------
-    # Load model
+    # Build low-level planner
     # ------------------------------------------------------------------
-    use_ddim = args.use_ddim and not args.no_ddim
-    model = load_model(
-        model_name=args.model,
-        checkpoint=args.checkpoint,
-        traj_len=args.traj_len,
-        embed_dim=args.embed_dim,
-        diffusion_steps=args.diffusion_steps,
-        device=device,
-    )
+    planner: LowLevelPlannerProtocol
 
-    planner = LowLevelPlanner(
-        model=model,
-        visible_range=args.visible_range,
-        batch_size=args.batch_size,
-        use_ddim=use_ddim,
-        ddim_steps=args.ddim_steps,
-        guidance_weight=args.guidance_weight,
-        device=device,
-    )
+    if args.low_level == "rrt":
+        planner = RRTLowLevel(
+            visible_range=args.visible_range,
+            traj_len=args.traj_len,
+            seed=args.seed,
+            max_samples=args.rrt_max_samples,
+            max_time_s=args.rrt_max_time,
+        )
+        logger.info("Using RRT-Connect low-level planner (no checkpoint needed).")
+    else:
+        if args.checkpoint is None:
+            raise ValueError("--checkpoint is required when --low_level diffusion")
+        use_ddim = args.use_ddim and not args.no_ddim
+        model = load_model(
+            model_name=args.model,
+            checkpoint=args.checkpoint,
+            traj_len=args.traj_len,
+            embed_dim=args.embed_dim,
+            diffusion_steps=args.diffusion_steps,
+            device=device,
+        )
+        planner = DiffusionLowLevel(
+            model=model,
+            visible_range=args.visible_range,
+            batch_size=args.batch_size,
+            use_ddim=use_ddim,
+            ddim_steps=args.ddim_steps,
+            guidance_weight=args.guidance_weight,
+            device=device,
+        )
 
     # ------------------------------------------------------------------
     # Episode files
@@ -432,31 +339,47 @@ def main() -> None:
         outlines = [episode_data[f"outline_{i}"] for i in range(N)]
 
         # ------------------------------------------------------------------
-        # Unconstrained baseline (no CBS guidance)
+        # Unconstrained baseline (independent, no coordination)
         # ------------------------------------------------------------------
-        unconstrained_trajs = run_unconstrained(episode_data, planner)
+        unconstrained_result = run_independent(
+            episode_data=episode_data,
+            outlines=outlines,
+            planner=planner,
+            visible_range=args.visible_range,
+        )
+        unconstrained_trajs = unconstrained_result.trajectories_world
         from visplan.planning.conflict_detector import count_conflicts
-        n_conflicts_unconstrained = count_conflicts(unconstrained_trajs, outlines)
+        n_conflicts_unconstrained = unconstrained_result.num_conflicts
         logger.info(
             "  Unconstrained conflicts: %d", n_conflicts_unconstrained
         )
 
         # ------------------------------------------------------------------
-        # CBS / PP planning
+        # CBS / PP / independent planning
         # ------------------------------------------------------------------
         plan_kwargs = dict(
             episode_data=episode_data,
             outlines=outlines,
             planner=planner,
             visible_range=args.visible_range,
-            constraint_margin=args.constraint_margin,
-            constraint_epsilon=args.constraint_epsilon,
         )
 
-        if args.algorithm == "cbs":
-            result = run_cbs(**plan_kwargs, max_nodes=args.max_nodes)
-        else:
-            result = run_pp(**plan_kwargs)
+        if args.algorithm == "independent":
+            # Re-use the already-computed independent result
+            result = unconstrained_result
+        elif args.algorithm == "cbs":
+            result = run_cbs(
+                **plan_kwargs,
+                constraint_margin=args.constraint_margin,
+                constraint_epsilon=args.constraint_epsilon,
+                max_nodes=args.max_nodes,
+            )
+        else:  # pp
+            result = run_pp(
+                **plan_kwargs,
+                constraint_margin=args.constraint_margin,
+                constraint_epsilon=args.constraint_epsilon,
+            )
 
         logger.info(
             "  Planned conflicts: %d | success: %s | nodes: %d | time: %.1fs",
@@ -481,23 +404,28 @@ def main() -> None:
         logger.info("  Saved: %s", npz_out)
 
         # ------------------------------------------------------------------
-        # Save visualisation video
+        # Save visualisation videos
         # ------------------------------------------------------------------
         if args.save_viz:
-            vid_out = os.path.join(
-                args.output_dir, f"{ep_name}_{args.algorithm}.mp4"
-            )
-            render_comparison_video(
-                episode_data=episode_data,
+            colors = piece_colors(N, seed=int(episode_data["voronoi_seed"]))
+            goal_poses = episode_data["goal_poses"]
+
+            planned_cmap = build_conflict_map(result.trajectories_world, outlines)
+
+            solo_out = os.path.join(args.output_dir, f"{ep_name}_solo.mp4")
+            render_solo_video(
                 outlines=outlines,
-                unconstrained_trajs=unconstrained_trajs,
-                planned_trajs=result.trajectories_world,
-                visible_range=args.visible_range,
+                trajectories=result.trajectories_world,
+                goal_poses=goal_poses,
+                colors=colors,
                 image_size=args.image_size,
-                output_path=vid_out,
+                half_range=args.visible_range,
+                output_path=solo_out,
                 fps=args.fps,
+                label=args.algorithm.upper(),
+                conflict_map=planned_cmap,
             )
-            logger.info("  Video: %s", vid_out)
+            logger.info("  Solo video: %s", solo_out)
 
         summary_rows.append({
             "episode": ep_name,

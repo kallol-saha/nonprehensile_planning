@@ -1,7 +1,7 @@
 """Low-level planner: wraps a trained diffusion model and produces trajectory
 batches for a single piece under a set of sphere constraints.
 
-LowLevelPlanner is the interface between CBS (which reasons about constraints
+DiffusionLowLevel is the interface between CBS (which reasons about constraints
 and conflicts) and the generative model (which produces trajectory samples).
 
 Responsibilities
@@ -20,7 +20,7 @@ Coordinate conventions
 The diffusion model operates in normalised space:
     x̃ = x / visible_range,   ỹ = y / visible_range,   θ → (cos θ, sin θ)
 
-LowLevelPlanner converts:
+DiffusionLowLevel converts:
   • world → normalised  before passing to the sampler
   • normalised → world  after sampling
 
@@ -31,16 +31,67 @@ the guided sampler without conversion.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 import torch
+try:
+    from typing import Protocol, runtime_checkable
+except ImportError:
+    from typing_extensions import Protocol, runtime_checkable  # type: ignore
 
 from visplan.planning.constraints import SphereConstraint
 from visplan.planning.guided_sampler import guided_ddim_sample, guided_ddpm_sample
 
 
-class LowLevelPlanner:
+# ---------------------------------------------------------------------------
+#  Protocol: shared interface for all low-level planners
+# ---------------------------------------------------------------------------
+
+@runtime_checkable
+class LowLevelPlannerProtocol(Protocol):
+    """Structural interface that all low-level planners must satisfy.
+
+    Both DiffusionLowLevel and RRTLowLevel implement this protocol so that
+    CBS and compare_methods.py can use either interchangeably.
+
+    Attributes
+    ----------
+    device : Any
+        The device (or device string) on which tensors should be placed.
+        DiffusionLowLevel sets this to a torch.device; RRTLowLevel uses "cpu".
+    """
+
+    device: Any
+
+    def plan_piece(
+        self,
+        scene_batch: dict,
+        constraints: List[SphereConstraint],
+    ) -> np.ndarray:
+        """Sample a batch of trajectories for one piece under the given constraints.
+
+        Args:
+            scene_batch: Dict with at minimum keys:
+                ``start_image`` (1, 3, H, W) float32 in [0, 1]
+                ``goal_image``  (1, 3, H, W) float32 in [0, 1]
+                ``piece_mask``  (1, 1, H, W) float32 in {0, 1}
+                plus optional keys ``start_pose``, ``goal_pose``, ``outline``,
+                ``piece_idx`` used by non-diffusion planners.
+            constraints: SphereConstraints (normalised coords) for this piece.
+
+        Returns:
+            (B, T, 3) numpy float32 array of SE(2) trajectories in world metres
+            [x, y, theta].
+        """
+        ...
+
+
+# ---------------------------------------------------------------------------
+#  DiffusionLowLevel (formerly LowLevelPlanner)
+# ---------------------------------------------------------------------------
+
+class DiffusionLowLevel:
     """Wraps a trained diffusion model as a CBS low-level planner.
 
     Args:
@@ -164,3 +215,12 @@ class LowLevelPlanner:
         return np.concatenate(
             [xy, theta[..., np.newaxis]], axis=-1
         ).astype(np.float32)  # (B, T, 3)
+
+
+# ---------------------------------------------------------------------------
+#  Backward-compatibility alias
+# ---------------------------------------------------------------------------
+
+# Keep old name importable so existing code that references LowLevelPlanner
+# continues to work during the transition period.
+LowLevelPlanner = DiffusionLowLevel

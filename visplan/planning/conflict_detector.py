@@ -250,3 +250,66 @@ def count_conflicts(
                 if poly_i.intersects(poly_j):
                     total += 1
     return total
+
+
+def compute_conflict_time_ratio(
+    trajectories_world: np.ndarray,
+    outlines: List[np.ndarray],
+) -> float:
+    """Fraction of timesteps at which any pair of pieces overlaps.
+
+    This metric captures *when* conflicts occur, not just how many.  A value
+    of 0.0 means the plan is collision-free at every timestep; 1.0 means every
+    single timestep has at least one pairwise overlap.
+
+    Unlike ``count_conflicts``, which counts every (pair, timestep) collision,
+    this metric collapses multiple simultaneous pair-wise overlaps at the same
+    timestep into a single "conflicted timestep", giving a value in [0, 1].
+
+    Optimisation: bounding-radius pre-check skips the full Shapely intersection
+    test for pairs that are guaranteed to be non-overlapping.
+
+    Args:
+        trajectories_world: (N, T, 3) SE(2) trajectories in world metres.
+        outlines:           List of N (V_i, 2) local-frame polygon outlines.
+
+    Returns:
+        Conflict time ratio ∈ [0.0, 1.0].
+    """
+    N, T, _ = trajectories_world.shape
+    if N < 2:
+        return 0.0
+
+    # Pre-compute bounding radii once (saves repeated norm calls)
+    bounding_radii = [_bounding_radius(ol) for ol in outlines]
+
+    conflict_at_t = np.zeros(T, dtype=bool)
+
+    for t in range(T):
+        if conflict_at_t[t]:
+            continue  # already marked; skip remaining pair checks for this t
+
+        for i in range(N):
+            if conflict_at_t[t]:
+                break  # one conflict found at t; move to next timestep
+
+            for j in range(i + 1, N):
+                # Fast bounding-radius pre-check
+                pose_i = trajectories_world[i, t]
+                pose_j = trajectories_world[j, t]
+                dist_ij = float(np.linalg.norm(pose_i[:2] - pose_j[:2]))
+                if dist_ij > bounding_radii[i] + bounding_radii[j]:
+                    continue  # pieces too far apart to overlap
+
+                poly_i = _apply_se2(outlines[i], pose_i)
+                poly_j = _apply_se2(outlines[j], pose_j)
+                if not poly_i.is_valid:
+                    poly_i = poly_i.buffer(0)
+                if not poly_j.is_valid:
+                    poly_j = poly_j.buffer(0)
+
+                if poly_i.intersects(poly_j):
+                    conflict_at_t[t] = True
+                    break  # no need to check more pairs at this timestep
+
+    return float(conflict_at_t.mean())

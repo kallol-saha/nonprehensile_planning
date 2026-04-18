@@ -55,7 +55,10 @@ from visplan.planning.conflict_detector import (
 )
 from visplan.planning.constraints import SphereConstraint
 from visplan.planning.ct_node import CTNode
-from visplan.planning.low_level_planner import LowLevelPlanner
+from visplan.planning.low_level_planner import LowLevelPlannerProtocol
+
+# Backward-compatibility alias so external code importing LowLevelPlanner still works
+from visplan.planning.low_level_planner import LowLevelPlanner  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -99,31 +102,51 @@ def _build_scene_batch(
     piece_idx: int,
     device,
 ) -> Dict:
-    """Build the model input batch dict for a single piece.
+    """Build the planner input dict for a single piece.
+
+    Returns a dict usable by both DiffusionLowLevel (needs image tensors) and
+    RRTLowLevel (needs start_pose, goal_pose, outline, piece_idx).
 
     Args:
         episode_data: Raw dict loaded from a .npz episode file (or equivalent
                       dict with the same keys).
         piece_idx:    Which piece to build the batch for.
-        device:       Torch device.
+        device:       Torch device (or "cpu" string for RRT).
 
     Returns:
-        Dict with keys start_image, goal_image, piece_mask — tensors on device,
-        batch dimension = 1.
+        Dict with keys:
+          start_image  (1,3,H,W) float32 tensor on device
+          goal_image   (1,3,H,W) float32 tensor on device
+          piece_mask   (1,1,H,W) float32 tensor on device
+          start_pose   (3,) float32 numpy [x, y, theta] world metres
+          goal_pose    (3,) float32 numpy [x, y, theta] world metres
+          piece_idx    int
+          outline      (V,2) float32 numpy local-frame polygon vertices
     """
     import torch
 
-    start_img = episode_data["start_image"].astype(np.float32) / 255.0
-    start_img = np.transpose(start_img, (2, 0, 1))   # (3, H, W)
-    goal_img = episode_data["goal_image"].astype(np.float32) / 255.0
-    goal_img = np.transpose(goal_img, (2, 0, 1))
-
-    mask = episode_data["piece_masks"][piece_idx].astype(np.float32)[None]  # (1, H, W)
+    # Images are optional — absent in synthetic episodes (no data_dir).
+    # RRT planners never read image tensors; only diffusion does.
+    if "start_image" in episode_data:
+        start_img = episode_data["start_image"].astype(np.float32) / 255.0
+        start_img = np.transpose(start_img, (2, 0, 1))   # (3, H, W)
+        goal_img = episode_data["goal_image"].astype(np.float32) / 255.0
+        goal_img = np.transpose(goal_img, (2, 0, 1))
+        mask = episode_data["piece_masks"][piece_idx].astype(np.float32)[None]
+        img_tensors = {
+            "start_image": torch.from_numpy(start_img).unsqueeze(0).to(device),
+            "goal_image":  torch.from_numpy(goal_img).unsqueeze(0).to(device),
+            "piece_mask":  torch.from_numpy(mask).unsqueeze(0).to(device),
+        }
+    else:
+        img_tensors = {"start_image": None, "goal_image": None, "piece_mask": None}
 
     return {
-        "start_image": torch.from_numpy(start_img).unsqueeze(0).to(device),   # (1,3,H,W)
-        "goal_image":  torch.from_numpy(goal_img).unsqueeze(0).to(device),    # (1,3,H,W)
-        "piece_mask":  torch.from_numpy(mask).unsqueeze(0).to(device),        # (1,1,H,W)
+        **img_tensors,
+        "start_pose": episode_data["start_poses"][piece_idx].astype(np.float32),
+        "goal_pose":  episode_data["goal_poses"][piece_idx].astype(np.float32),
+        "piece_idx":  piece_idx,
+        "outline":    episode_data[f"outline_{piece_idx}"].astype(np.float32),
     }
 
 
@@ -134,7 +157,7 @@ def _build_scene_batch(
 def run_cbs(
     episode_data: dict,
     outlines: List[np.ndarray],
-    planner: LowLevelPlanner,
+    planner: LowLevelPlannerProtocol,
     visible_range: float,
     constraint_margin: float = 1.2,
     constraint_epsilon: float = 1.2,
@@ -301,13 +324,66 @@ def run_cbs(
 
 
 # ---------------------------------------------------------------------------
+#  Independent planning (no coordination between pieces)
+# ---------------------------------------------------------------------------
+
+def run_independent(
+    episode_data: dict,
+    outlines: List[np.ndarray],
+    planner: LowLevelPlannerProtocol,
+    visible_range: float,
+) -> PlanningResult:
+    """Plan each piece independently with empty constraints (no CBS, no PP).
+
+    This is the simplest baseline: each piece plans without any knowledge of
+    the other pieces.  The first trajectory from the returned batch (index 0)
+    is selected as the representative for each piece.
+
+    Args:
+        episode_data: Dict with keys from a .npz episode file.
+        outlines:     List of N (V_i, 2) local-frame polygon outlines.
+        planner:      Low-level planner (diffusion or RRT).
+        visible_range: Camera half-extent in metres (unused here but kept for
+                       API consistency with run_cbs / run_pp).
+
+    Returns:
+        PlanningResult with nodes_expanded=0 (no search tree).
+    """
+    from visplan.planning.conflict_detector import count_conflicts
+
+    t_start = time.time()
+    N = int(episode_data["num_pieces"])
+    planned_trajs: List[np.ndarray] = []
+
+    for i in range(N):
+        scene_batch = _build_scene_batch(episode_data, i, planner.device)
+        batch_world = planner.plan_piece(scene_batch, constraints=[])
+        # batch_world: (B, T, 3); take first sample as representative
+        planned_trajs.append(batch_world[0])
+        logger.debug("Independent piece %d planned.", i)
+
+    trajectories_world = np.stack(planned_trajs, axis=0)  # (N, T, 3)
+    num_conflicts = count_conflicts(trajectories_world, outlines)
+
+    logger.info("Independent finished. Conflicts: %d", num_conflicts)
+
+    return PlanningResult(
+        trajectories_world=trajectories_world,
+        num_conflicts=num_conflicts,
+        success=num_conflicts == 0,
+        nodes_expanded=0,
+        planning_time_s=time.time() - t_start,
+    )
+
+
+# ---------------------------------------------------------------------------
 #  MMD-PP (Prioritised Planning)
 # ---------------------------------------------------------------------------
 
 def run_pp(
     episode_data: dict,
     outlines: List[np.ndarray],
-    planner: LowLevelPlanner,
+    planner: LowLevelPlannerProtocol,
     visible_range: float,
     constraint_margin: float = 1.2,
     constraint_epsilon: float = 1.2,
