@@ -149,19 +149,22 @@ class TemporalUNet(nn.Module):
             nn.Conv1d(ch, traj_dim, 1),
         )
 
-    def forward(self, x_t, t, cond):
+    def forward(self, x_t, t, cond=None):
         """
         Args:
             x_t:  (B, T_traj, traj_dim) noisy trajectory
             t:    (B,) diffusion timestep
-            cond: (B, cond_dim) scene embedding
+            cond: (B, cond_dim) scene embedding, or None for unconditional
 
         Returns:
             (B, T_traj, traj_dim) predicted noise
         """
         # Prepare conditioning
         t_emb = self.time_mlp(t)               # (B, time_dim)
-        cond = torch.cat([cond, t_emb], dim=-1)  # (B, cond_dim + time_dim)
+        if cond is not None and cond.shape[-1] > 0:
+            cond = torch.cat([cond, t_emb], dim=-1)  # (B, cond_dim + time_dim)
+        else:
+            cond = t_emb                             # (B, time_dim)
 
         # (B, T_traj, D) → (B, D, T_traj) for 1D convs
         x = x_t.permute(0, 2, 1)
