@@ -222,7 +222,7 @@ def sample_eval_episodes(
     idxs.sort()
     chosen = [files[i] for i in idxs]
     logger.info(
-        "Selected %d/%d val episodes (seed=%d).", len(chosen), len(val_files), seed
+        "Selected %d/%d val episodes (seed=%d).", len(chosen), len(files), seed
     )
     return chosen
 

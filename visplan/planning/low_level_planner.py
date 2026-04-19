@@ -115,6 +115,7 @@ class DiffusionLowLevel:
         ddim_steps: int = 20,
         guidance_weight: float = 0.2,
         device: Union[str, torch.device] = "cuda",
+        tail_blend_steps: int = 4,
     ):
         self.model = model
         self.visible_range = visible_range
@@ -123,6 +124,9 @@ class DiffusionLowLevel:
         self.ddim_steps = ddim_steps
         self.guidance_weight = guidance_weight
         self.device = torch.device(device)
+        # Number of final waypoints linearly blended toward the exact goal pose
+        # so the trajectory lands on goal. 0 disables. See _blend_tail_to_goal.
+        self.tail_blend_steps = int(tail_blend_steps)
 
         # Infer traj_len and traj_dim from the model attributes
         self.traj_len: int = model.traj_len
@@ -161,7 +165,14 @@ class DiffusionLowLevel:
         # traj_norm: (B, T, 4)
 
         # Denormalise to world SE(2) metres
-        return self._denormalise(traj_norm)
+        traj_world = self._denormalise(traj_norm)  # (B, T, 3)
+
+        # Blend the tail toward the exact goal pose so the trajectory lands
+        # precisely at goal (mitigates the learned policy's terminal drift).
+        goal_pose = scene_batch.get("goal_pose")
+        if self.tail_blend_steps > 0 and goal_pose is not None:
+            traj_world = self._blend_tail_to_goal(traj_world, goal_pose)
+        return traj_world
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -202,6 +213,54 @@ class DiffusionLowLevel:
             )
         else:
             return guided_ddpm_sample(**sampler_kwargs)
+
+    def _blend_tail_to_goal(
+        self,
+        traj_world: np.ndarray,
+        goal_pose,
+    ) -> np.ndarray:
+        """Linearly blend the last K waypoints toward the exact goal pose.
+
+        Weight ramps from 0 at t = T-K to 1 at t = T-1, so the last waypoint
+        equals goal and earlier waypoints are only slightly nudged. Theta is
+        blended along the shortest arc to avoid wrap-around artefacts.
+
+        Args:
+            traj_world: (B, T, 3) SE(2) trajectories in world metres.
+            goal_pose:  (3,) numpy array or tensor [x, y, theta] in world metres.
+
+        Returns:
+            (B, T, 3) float32 trajectory with endpoint clamped to goal.
+        """
+        K = min(self.tail_blend_steps, self.traj_len)
+        if K <= 0:
+            return traj_world
+
+        if isinstance(goal_pose, torch.Tensor):
+            goal = goal_pose.detach().cpu().numpy().astype(np.float32).reshape(3)
+        else:
+            goal = np.asarray(goal_pose, dtype=np.float32).reshape(3)
+
+        out = traj_world.copy()
+        T = out.shape[1]
+        # Weights 1/K, 2/K, ..., K/K over the last K timesteps
+        alphas = np.linspace(1.0 / K, 1.0, K, dtype=np.float32)
+        tail_idx = np.arange(T - K, T)
+
+        # xy: simple linear interpolation
+        tail_xy = out[:, tail_idx, :2]                               # (B, K, 2)
+        out[:, tail_idx, :2] = (
+            (1.0 - alphas)[None, :, None] * tail_xy
+            + alphas[None, :, None] * goal[:2][None, None, :]
+        )
+
+        # theta: shortest-arc blend, then wrap to [-π, π]
+        tail_th = out[:, tail_idx, 2]                                # (B, K)
+        dtheta = (goal[2] - tail_th + np.pi) % (2 * np.pi) - np.pi    # (B, K)
+        blended = tail_th + alphas[None, :] * dtheta
+        out[:, tail_idx, 2] = (blended + np.pi) % (2 * np.pi) - np.pi
+
+        return out.astype(np.float32)
 
     def _denormalise(self, traj_norm: torch.Tensor) -> np.ndarray:
         """Convert (B, T, 4) normalised tensor → (B, T, 3) world numpy array.
