@@ -141,11 +141,15 @@ def guidance_gradient(
     if not constraints:
         return torch.zeros_like(x)
 
-    # Work on a leaf copy so we can call backward without polluting the graph
-    x_leaf = x.detach().requires_grad_(True)
-
-    cost = compute_guidance_cost(x_leaf, constraints)
-    cost.backward()
-
-    grad = x_leaf.grad.detach()  # same shape as x
+    # Work on a leaf copy so we can call backward without polluting the graph.
+    # enable_grad() re-enables autograd locally, since the DDPM/DDIM samplers
+    # call this from inside a @torch.no_grad() context.
+    with torch.enable_grad():
+        x_leaf = x.detach().requires_grad_(True)
+        cost = compute_guidance_cost(x_leaf, constraints)
+        if not cost.requires_grad:
+            # All constraint windows skipped → cost is a constant zero; no grad.
+            return torch.zeros_like(x)
+        cost.backward()
+        grad = x_leaf.grad.detach()
     return grad
